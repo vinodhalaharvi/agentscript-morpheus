@@ -5,35 +5,34 @@
 One line replaces hundreds of lines of code.
 
 ```
-search "AI trends" -> summarize -> email "you@gmail.com"
+search "AI trends" >=> summarize >=> email "you@gmail.com"
 ```
 
 ## What It Does
 
-AgentScript lets you chain Gemini AI with 45+ integrations using Unix-pipe-style syntax. Research topics, generate images and videos, send emails, check stocks, monitor Reddit, read RSS feeds, get weather forecasts, search jobs — all in one script.
+AgentScript lets you chain Gemini AI with 45+ integrations using Morpheus category-theory operators. Research topics, generate images and videos, send emails, check stocks, monitor Reddit, read RSS feeds, get weather forecasts, search jobs — all in one script.
 
 ```bash
 # Morning briefing in one command
-parallel {
-  weather "San Francisco"
-  crypto "BTC,ETH,SOL"
-  stock "AAPL,NVDA,MSFT"
-  news_headlines "technology"
-  rss "hn"
-  reddit "r/golang"
-  job_search "golang contract" "remote"
-}
--> merge
--> ask "morning briefing with weather, markets, headlines, and jobs"
--> notify "slack"
--> email "you@gmail.com"
+( weather "San Francisco"
+  <*> crypto "BTC,ETH,SOL"
+  <*> stock "AAPL,NVDA,MSFT"
+  <*> news_headlines "technology"
+  <*> rss "hn"
+  <*> reddit "r/golang"
+  <*> job_search "golang contract" "remote"
+)
+>=> merge
+>=> ask "morning briefing with weather, markets, headlines, and jobs"
+>=> notify "slack"
+>=> email "you@gmail.com"
 ```
 
 ## Quick Start
 
 ```bash
-git clone https://github.com/vinodhalaharvi/agentscript
-cd agentscript
+git clone https://github.com/vinodhalaharvi/agentscript-mcp-tools
+cd agentscript-mcp-tools
 go mod tidy
 go build -o agentscript .
 
@@ -41,7 +40,7 @@ export GEMINI_API_KEY="your-key"
 
 # Try it
 ./agentscript -e 'ask "hello world"'
-./agentscript -e 'search "golang trends" -> summarize'
+./agentscript -e 'search "golang trends" >=> summarize'
 ./agentscript -e 'crypto "BTC,ETH,SOL"'
 ./agentscript -e 'weather "New York"'
 ```
@@ -50,14 +49,18 @@ export GEMINI_API_KEY="your-key"
 
 ```
 Program     = Statement*
-Statement   = (If | Parallel | ForEach | Command) ("->" Statement)?
-Parallel    = "parallel" "{" Statement* "}"
-If          = "if" String "{" Statement* "}" ("else" "{" Statement* "}")?
-ForEach     = "foreach" String?
+Statement   = Command | "(" Parallel ")"
+Parallel    = Statement ( "<*>" Statement )*
+Statement   = Command ( ">=>" Statement )?
 Command     = Action String*
 ```
 
-That's it. Six lines define the entire language.
+Two operators define the entire language:
+
+| Operator | Meaning |
+|----------|---------|
+| `>=>` | Kleisli composition — sequential pipeline stage |
+| `<*>` | Fan-out — run branches concurrently (inside parentheses) |
 
 ## All 45 Commands
 
@@ -65,13 +68,13 @@ That's it. Six lines define the entire language.
 | Command | Example | Description |
 |---------|---------|-------------|
 | `search` | `search "topic"` | Web search via Gemini |
-| `summarize` | `-> summarize` | Summarize piped input |
-| `ask` | `-> ask "question"` | Ask with context |
-| `analyze` | `-> analyze "focus"` | Deep analysis |
-| `save` | `-> save "file.md"` | Save to local file |
+| `summarize` | `>=> summarize` | Summarize piped input |
+| `ask` | `>=> ask "question"` | Ask with context |
+| `analyze` | `>=> analyze "focus"` | Deep analysis |
+| `save` | `>=> save "file.md"` | Save to local file |
 | `read` | `read "file.txt"` | Read local file |
 | `list` | `list "."` | List directory |
-| `merge` | `-> merge` | Merge parallel results |
+| `merge` | `>=> merge` | Merge fan-out results |
 
 ### Data
 | Command | Example | API | Key? |
@@ -89,14 +92,14 @@ That's it. Six lines define the entire language.
 ### Google Workspace
 | Command | Example | API |
 |---------|---------|-----|
-| `email` | `-> email "to@gmail.com"` | Gmail |
-| `calendar` | `-> calendar "Meeting 2pm"` | Calendar |
-| `meet` | `-> meet "Sprint Review"` | Calendar+Meet |
-| `drive_save` | `-> drive_save "path/file"` | Drive |
-| `doc_create` | `-> doc_create "Title"` | Docs |
-| `sheet_create` | `-> sheet_create "Title"` | Sheets |
-| `sheet_append` | `-> sheet_append "id/sheet"` | Sheets |
-| `task` | `-> task "todo"` | Tasks |
+| `email` | `>=> email "to@gmail.com"` | Gmail |
+| `calendar` | `>=> calendar "Meeting 2pm"` | Calendar |
+| `meet` | `>=> meet "Sprint Review"` | Calendar+Meet |
+| `drive_save` | `>=> drive_save "path/file"` | Drive |
+| `doc_create` | `>=> doc_create "Title"` | Docs |
+| `sheet_create` | `>=> sheet_create "Title"` | Sheets |
+| `sheet_append` | `>=> sheet_append "id/sheet"` | Sheets |
+| `task` | `>=> task "todo"` | Tasks |
 | `contact_find` | `contact_find "John"` | People |
 | `youtube_search` | `youtube_search "query"` | YouTube |
 
@@ -107,61 +110,74 @@ That's it. Six lines define the entire language.
 | `image_analyze` | `image_analyze "describe"` | Gemini |
 | `video_generate` | `video_generate "sunset"` | Veo 3.1 |
 | `video_analyze` | `video_analyze "summarize"` | Gemini |
-| `images_to_video` | `-> images_to_video` | ffmpeg |
-| `tts` | `-> tts "en"` | Gemini TTS |
-| `translate` | `-> translate "Japanese"` | Gemini |
+| `images_to_video` | `>=> images_to_video` | ffmpeg |
+| `text_to_speech` | `>=> text_to_speech "en"` | Gemini TTS |
+| `translate` | `>=> translate "Japanese"` | Gemini |
 
 ### Notifications
 | Command | Example | Service |
 |---------|---------|---------|
-| `email` | `-> email "you@gmail.com"` | Gmail |
-| `notify` | `-> notify "slack"` | Slack/Discord/Telegram |
-| `whatsapp` | `-> whatsapp "+1234567890"` | Twilio |
+| `email` | `>=> email "you@gmail.com"` | Gmail |
+| `notify` | `>=> notify "slack"` | Slack/Discord/Telegram |
+| `whatsapp` | `>=> whatsapp "+1234567890"` | Twilio |
 
 ### Control Flow
 | Command | Example | Description |
 |---------|---------|-------------|
-| `parallel` | `parallel { ... }` | Run branches concurrently |
-| `if` | `if "rain > 50" { ... }` | Conditional execution |
-| `foreach` | `-> foreach "line"` | Iterate over items |
+| `( <*> )` | `( a <*> b <*> c )` | Run branches concurrently |
+| `if` | `if "rain > 50"` | Conditional execution |
+| `foreach` | `>=> foreach "line"` | Iterate over items |
 
 ## Example Pipelines
 
 ### Daily Job Hunt
 ```
-parallel {
-  job_search "golang contract" "remote"
-  job_search "go microservices" "remote"
-}
--> merge
--> ask "deduplicate, format as table, sort by rate"
--> email "you@gmail.com"
+( job_search "golang contract" "remote"
+  <*> job_search "go microservices" "remote"
+)
+>=> merge
+>=> ask "deduplicate, format as table, sort by rate"
+>=> email "you@gmail.com"
 ```
 
 ### Stock Alert
 ```
-stock "NVDA" -> if "change > 5" { notify "slack" }
+stock "NVDA" >=> if "change > 5" >=> notify "slack"
 ```
 
 ### Tech Digest
 ```
-parallel {
-  rss "hn"
-  rss "lobsters"
-  reddit "r/golang" "top"
-  news_headlines "technology"
-}
--> merge -> summarize -> email "you@gmail.com"
+( rss "hn"
+  <*> rss "lobsters"
+  <*> reddit "r/golang" "top"
+  <*> news_headlines "technology"
+)
+>=> merge >=> summarize >=> email "you@gmail.com"
 ```
 
 ### Multimodal Pipeline
 ```
 search "butterflies migration"
--> summarize
--> tts "en"
--> image_generate "monarch butterflies migrating"
--> images_to_video
--> youtube_upload "Butterfly Migration"
+>=> summarize
+>=> text_to_speech "en"
+>=> image_generate "monarch butterflies migrating"
+>=> images_to_video
+>=> youtube_upload "Butterfly Migration"
+```
+
+### Nested Fan-out
+```
+( ( search "React pros cons" >=> analyze
+    <*> search "Vue pros cons" >=> analyze
+    <*> search "Angular pros cons" >=> analyze
+  ) >=> merge >=> ask "summarize frontend frameworks"
+  <*> ( search "Node.js backend" >=> analyze
+        <*> search "Go backend" >=> analyze
+      ) >=> merge >=> ask "summarize backend options"
+)
+>=> merge
+>=> ask "full-stack recommendation"
+>=> save "recommendation.md"
 ```
 
 ### Natural Language Mode
@@ -194,12 +210,14 @@ No URL needed — just use the shortcut name:
 Natural Language ─── Gemini translates ──→ AgentScript DSL
                                               │
                                          Participle parser
+                                         (Morpheus grammar)
                                               │
                                              AST
                                               │
                                         Runtime executor
                                         ┌─────┴─────┐
-                                   Sequential    Parallel
+                                   Sequential    Fan-out
+                                     (>=>)        (<*>)
                                         │            │
                               ┌────┬────┴────┐   goroutines
                               │    │    │    │
@@ -211,7 +229,7 @@ Natural Language ─── Gemini translates ──→ AgentScript DSL
 ```
 agentscript/
 ├── main.go           # CLI entry point (expression, file, REPL, natural language modes)
-├── grammar.go        # Participle grammar definition
+├── grammar.go        # Morpheus DSL grammar (>=>, <*>, parentheses)
 ├── runtime.go        # Command execution engine
 ├── client.go         # Gemini API client (text, Imagen 4, Veo 3.1, TTS)
 ├── google.go         # Google Workspace integrations
@@ -272,7 +290,7 @@ export TWILIO_WHATSAPP_FROM="whatsapp:+14155238886"
 
 ```bash
 # Expression mode
-./agentscript -e 'search "topic" -> summarize'
+./agentscript -e 'search "topic" >=> summarize'
 
 # File mode
 ./agentscript -f examples/daily-briefing.as

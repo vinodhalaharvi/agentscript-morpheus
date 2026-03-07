@@ -86,14 +86,13 @@ help:
 	@echo "  <*>   Fan-out — run branches concurrently (inside parentheses)"
 	@echo "  ( )   Group  — enclose a fan-out block"
 
-.PHONY: build test run run-file repl natural example-simple example-parallel example-nested example-multimodal clean deps help
-
-
-# Upload to a new private GitHub repo (requires: gh auth login)
 # Upload to a new private GitHub repo (requires: gh auth login)
 git-upload:
-	git add .
-	git commit -m "Initial commit — AgentScript with Morpheus DSL frontend" || true
+	@if [ ! -d .git ]; then \
+		git init && \
+		git add . && \
+		git commit -m "Initial commit — AgentScript with Morpheus DSL frontend"; \
+	fi
 	gh repo create agentscript-mcp-tools --private --source=. --remote=origin --push
 
-.PHONY: git-upload
+.PHONY: build test run run-file repl natural example-simple example-parallel example-nested example-multimodal clean deps help git-upload
