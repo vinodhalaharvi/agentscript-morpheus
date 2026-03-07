@@ -1,0 +1,5 @@
+stdin "Where do you want to travel? "
+>=> ask "List 10 must-see places for a trip to this destination with addresses"
+>=> maps_trip "My Trip"
+>=> ask "Add key travel phrases translated to the local language"
+>=> email "vinod.halaharvi@gmail.com"
