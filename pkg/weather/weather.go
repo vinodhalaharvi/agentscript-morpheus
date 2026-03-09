@@ -236,7 +236,7 @@ func (wc *WeatherClient) fetchWeather(ctx context.Context, lat, lon float64) (*W
 			Humidity:      raw.Current.Humidity,
 			WindSpeed:     raw.Current.WindSpeed,
 			WindDirection: raw.Current.WindDirection,
-			Condition:     wmoCodeToCondition(raw.Current.WeatherCode),
+			Condition:     WmoCodeToCondition(raw.Current.WeatherCode),
 			ConditionCode: raw.Current.WeatherCode,
 			IsDay:         raw.Current.IsDay == 1,
 		},
@@ -250,7 +250,7 @@ func (wc *WeatherClient) fetchWeather(ctx context.Context, lat, lon float64) (*W
 			Humidity:      raw.Hourly.Humidity[i],
 			RainChance:    raw.Hourly.PrecipProb[i],
 			WindSpeed:     raw.Hourly.WindSpeed[i],
-			Condition:     wmoCodeToCondition(raw.Hourly.WeatherCode[i]),
+			Condition:     WmoCodeToCondition(raw.Hourly.WeatherCode[i]),
 			ConditionCode: raw.Hourly.WeatherCode[i],
 		})
 	}
@@ -264,7 +264,7 @@ func (wc *WeatherClient) fetchWeather(ctx context.Context, lat, lon float64) (*W
 			RainChance:   raw.Daily.PrecipProbMax[i],
 			RainSum:      raw.Daily.PrecipSum[i],
 			WindSpeedMax: raw.Daily.WindSpeedMax[i],
-			Condition:    wmoCodeToCondition(raw.Daily.WeatherCode[i]),
+			Condition:    WmoCodeToCondition(raw.Daily.WeatherCode[i]),
 			Sunrise:      raw.Daily.Sunrise[i],
 			Sunset:       raw.Daily.Sunset[i],
 		})
@@ -335,9 +335,9 @@ func FormatWeatherBrief(w *WeatherData) string {
 	)
 }
 
-// wmoCodeToCondition converts WMO weather codes to human-readable conditions
+// WmoCodeToCondition converts WMO weather codes to human-readable conditions
 // See: https://open-meteo.com/en/docs#weathervariables
-func wmoCodeToCondition(code int) string {
+func WmoCodeToCondition(code int) string {
 	switch code {
 	case 0:
 		return "Clear sky"

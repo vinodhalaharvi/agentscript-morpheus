@@ -76,8 +76,8 @@ var feedShortcuts = map[string]string{
 	"morning-brew":  "https://www.morningbrew.com/feed",
 }
 
-// resolveFeedURL converts a shortcut or URL to a full feed URL
-func resolveFeedURL(input string) string {
+// ResolveFeedURL converts a shortcut or URL to a full feed URL
+func ResolveFeedURL(input string) string {
 	lower := strings.ToLower(strings.TrimSpace(input))
 
 	// Check shortcuts
@@ -100,7 +100,7 @@ func (rc *RSSClient) FetchFeed(ctx context.Context, feedURL string, maxItems int
 		maxItems = 10
 	}
 
-	resolvedURL := resolveFeedURL(feedURL)
+	resolvedURL := ResolveFeedURL(feedURL)
 	rc.log("Fetching feed: %s", resolvedURL)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", resolvedURL, nil)
@@ -203,7 +203,7 @@ func (rc *RSSClient) parseRSS(body []byte, maxItems int) ([]RSSItem, string, err
 			author = item.Creator
 		}
 
-		desc := stripHTML(item.Description)
+		desc := StripHTML(item.Description)
 		if len(desc) > 300 {
 			desc = desc[:300] + "..."
 		}
@@ -252,7 +252,7 @@ func (rc *RSSClient) parseAtom(body []byte, maxItems int) ([]RSSItem, string, er
 		if desc == "" {
 			desc = entry.Content
 		}
-		desc = stripHTML(desc)
+		desc = StripHTML(desc)
 		if len(desc) > 300 {
 			desc = desc[:300] + "..."
 		}
@@ -275,8 +275,8 @@ func (rc *RSSClient) parseAtom(body []byte, maxItems int) ([]RSSItem, string, er
 	return items, feed.Title, nil
 }
 
-// stripHTML removes HTML tags from a string (simple version)
-func stripHTML(s string) string {
+// StripHTML removes HTML tags from a string (simple version)
+func StripHTML(s string) string {
 	var result strings.Builder
 	inTag := false
 	for _, r := range s {

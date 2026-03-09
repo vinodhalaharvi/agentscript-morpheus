@@ -52,7 +52,7 @@ func (wc *WhatsAppClient) Send(ctx context.Context, to string, message string) (
 	}
 
 	// Normalize the "to" number
-	to = normalizeWhatsAppNumber(to)
+	to = NormalizeWhatsAppNumber(to)
 
 	// Twilio API endpoint
 	apiURL := fmt.Sprintf("https://api.twilio.com/2010-04-01/Accounts/%s/Messages.json", wc.accountSID)
@@ -109,8 +109,8 @@ func (wc *WhatsAppClient) Send(ctx context.Context, to string, message string) (
 	return fmt.Sprintf("WhatsApp sent to %s (status: %s)\n\n%s", to, result.Status, message), nil
 }
 
-// normalizeWhatsAppNumber ensures the number is in whatsapp:+XXXXXXXXXXX format
-func normalizeWhatsAppNumber(number string) string {
+// NormalizeWhatsAppNumber ensures the number is in whatsapp:+XXXXXXXXXXX format
+func NormalizeWhatsAppNumber(number string) string {
 	number = strings.TrimSpace(number)
 
 	// Already in correct format

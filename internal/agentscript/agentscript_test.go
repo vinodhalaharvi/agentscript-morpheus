@@ -7,6 +7,18 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/vinodhalaharvi/agentscript/pkg/cache"
+	"github.com/vinodhalaharvi/agentscript/pkg/crypto"
+	"github.com/vinodhalaharvi/agentscript/pkg/jobsearch"
+	"github.com/vinodhalaharvi/agentscript/pkg/news"
+	"github.com/vinodhalaharvi/agentscript/pkg/reddit"
+	"github.com/vinodhalaharvi/agentscript/pkg/retry"
+	"github.com/vinodhalaharvi/agentscript/pkg/rss"
+	"github.com/vinodhalaharvi/agentscript/pkg/stock"
+	"github.com/vinodhalaharvi/agentscript/pkg/twitter"
+	"github.com/vinodhalaharvi/agentscript/pkg/weather"
+	"github.com/vinodhalaharvi/agentscript/pkg/whatsapp"
 )
 
 // ============================================================================
@@ -127,7 +139,7 @@ func TestParseStockSymbols(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			result := ParseStockSymbols(tt.input)
+			result := stock.ParseStockSymbols(tt.input)
 			if len(result) != len(tt.expected) {
 				t.Fatalf("got %d symbols, want %d: %v", len(result), len(tt.expected), result)
 			}
@@ -154,7 +166,7 @@ func TestParseCryptoSymbols(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			result := ParseCryptoSymbols(tt.input)
+			result := crypto.ParseCryptoSymbols(tt.input)
 			if tt.isTop {
 				if result != nil {
 					t.Errorf("expected nil for top query, got %v", result)
@@ -182,7 +194,7 @@ func TestParseJobSearchArgs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(strings.Join(tt.args, "|"), func(t *testing.T) {
-			config := ParseJobSearchArgs(tt.args...)
+			config := jobsearch.ParseJobSearchArgs(tt.args...)
 			if config.Query != tt.query {
 				t.Errorf("query: got %q, want %q", config.Query, tt.query)
 			}
@@ -210,7 +222,7 @@ func TestParseRedditArgs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(strings.Join(tt.args, "|"), func(t *testing.T) {
-			isSub, query, sort := ParseRedditArgs(tt.args...)
+			isSub, query, sort := reddit.ParseRedditArgs(tt.args...)
 			if isSub != tt.isSub {
 				t.Errorf("isSub: got %v, want %v", isSub, tt.isSub)
 			}
@@ -237,7 +249,7 @@ func TestResolveFeedURL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			result := resolveFeedURL(tt.input)
+			result := rss.ResolveFeedURL(tt.input)
 			if !strings.Contains(result, tt.contains) {
 				t.Errorf("got %q, want it to contain %q", result, tt.contains)
 			}
@@ -257,7 +269,7 @@ func TestNormalizeWhatsAppNumber(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			result := normalizeWhatsAppNumber(tt.input)
+			result := whatsapp.NormalizeWhatsAppNumber(tt.input)
 			if result != tt.expected {
 				t.Errorf("got %q, want %q", result, tt.expected)
 			}
@@ -364,7 +376,7 @@ func TestIsRetryableError(t *testing.T) {
 			if tt.errMsg != "" {
 				err = fmt.Errorf(tt.errMsg)
 			}
-			result := isRetryableError(err)
+			result := retry.IsRetryableError(err)
 			if result != tt.retryable {
 				t.Errorf("got %v, want %v", result, tt.retryable)
 			}
@@ -374,7 +386,7 @@ func TestIsRetryableError(t *testing.T) {
 
 func TestWithRetrySuccess(t *testing.T) {
 	ctx := testContext()
-	config := RetryConfig{
+	config := retry.RetryConfig{
 		MaxAttempts:  3,
 		InitialDelay: 10 * time.Millisecond,
 		MaxDelay:     100 * time.Millisecond,
@@ -383,7 +395,7 @@ func TestWithRetrySuccess(t *testing.T) {
 	}
 
 	attempts := 0
-	result, err := WithRetryString(ctx, config, "test", false, func() (string, error) {
+	result, err := retry.WithRetryString(ctx, config, "test", false, func() (string, error) {
 		attempts++
 		if attempts < 3 {
 			return "", fmt.Errorf("status 429: rate limit")
@@ -404,11 +416,11 @@ func TestWithRetrySuccess(t *testing.T) {
 
 func TestWithRetryNonRetryable(t *testing.T) {
 	ctx := testContext()
-	config := DefaultRetryConfig()
+	config := retry.DefaultRetryConfig()
 	config.InitialDelay = 10 * time.Millisecond
 
 	attempts := 0
-	_, err := WithRetryString(ctx, config, "test", false, func() (string, error) {
+	_, err := retry.WithRetryString(ctx, config, "test", false, func() (string, error) {
 		attempts++
 		return "", fmt.Errorf("invalid input: bad request")
 	})
@@ -431,43 +443,43 @@ func TestCache(t *testing.T) {
 	os.Setenv("AGENTSCRIPT_CACHE_DIR", tmpDir)
 	defer os.Unsetenv("AGENTSCRIPT_CACHE_DIR")
 
-	cache := NewCache(false)
+	_cache := cache.NewCache(false)
 
 	// Test miss
-	_, ok := cache.Get("test", "key1")
+	_, ok := _cache.Get("test", "key1")
 	if ok {
-		t.Error("expected cache miss")
+		t.Error("expected _cache miss")
 	}
 
 	// Test set + hit
-	cache.Set("test", "key1", "hello world", 60)
-	data, ok := cache.Get("test", "key1")
+	_cache.Set("test", "key1", "hello world", 60)
+	data, ok := _cache.Get("test", "key1")
 	if !ok {
-		t.Error("expected cache hit")
+		t.Error("expected _cache hit")
 	}
 	if data != "hello world" {
 		t.Errorf("got %q, want 'hello world'", data)
 	}
 
 	// Test expiry
-	cache.Set("test", "key2", "expired", 1) // 1 second TTL
+	_cache.Set("test", "key2", "expired", 1) // 1 second TTL
 	time.Sleep(1100 * time.Millisecond)
-	_, ok = cache.Get("test", "key2")
+	_, ok = _cache.Get("test", "key2")
 	if ok {
-		t.Error("expected cache miss after expiry")
+		t.Error("expected _cache miss after expiry")
 	}
 
 	// Test invalidate
-	cache.Set("test", "key3", "data", 60)
-	cache.Invalidate("test", "key3")
-	_, ok = cache.Get("test", "key3")
+	_cache.Set("test", "key3", "data", 60)
+	_cache.Invalidate("test", "key3")
+	_, ok = _cache.Get("test", "key3")
 	if ok {
-		t.Error("expected cache miss after invalidate")
+		t.Error("expected _cache miss after invalidate")
 	}
 
 	// Test CachedGet
 	calls := 0
-	result, err := CachedGet(cache, "test", "cached1", 60, func() (string, error) {
+	result, err := cache.CachedGet(_cache, "test", "cached1", 60, func() (string, error) {
 		calls++
 		return "fetched", nil
 	})
@@ -478,13 +490,13 @@ func TestCache(t *testing.T) {
 		t.Errorf("got %q, want 'fetched'", result)
 	}
 
-	// Second call should hit cache
-	result2, _ := CachedGet(cache, "test", "cached1", 60, func() (string, error) {
+	// Second call should hit _cache
+	result2, _ := cache.CachedGet(_cache, "test", "cached1", 60, func() (string, error) {
 		calls++
 		return "fetched-again", nil
 	})
 	if result2 != "fetched" {
-		t.Errorf("cache should return original, got %q", result2)
+		t.Errorf("_cache should return original, got %q", result2)
 	}
 	if calls != 1 {
 		t.Errorf("expected 1 fetch call, got %d", calls)
@@ -496,12 +508,12 @@ func TestCache(t *testing.T) {
 // ============================================================================
 
 func TestFormatStockQuotes(t *testing.T) {
-	quotes := []StockQuote{
+	quotes := []stock.StockQuote{
 		{Symbol: "AAPL", CurrentPrice: 185.50, Change: 2.30, ChangePercent: 1.25},
 		{Symbol: "GOOGL", CurrentPrice: 140.20, Change: -1.10, ChangePercent: -0.78},
 	}
 
-	result := FormatStockQuotes(quotes)
+	result := stock.FormatStockQuotes(quotes)
 	if !strings.Contains(result, "AAPL") {
 		t.Error("missing AAPL in output")
 	}
@@ -514,12 +526,12 @@ func TestFormatStockQuotes(t *testing.T) {
 }
 
 func TestFormatCryptoPrices(t *testing.T) {
-	prices := []CryptoPrice{
+	prices := []crypto.CryptoPrice{
 		{Symbol: "BTC", Name: "Bitcoin", CurrentPrice: 95000, PriceChangePct24h: 2.5, MarketCapRank: 1, MarketCap: 1800000000000},
 		{Symbol: "ETH", Name: "Ethereum", CurrentPrice: 3200, PriceChangePct24h: -1.2, MarketCapRank: 2, MarketCap: 380000000000},
 	}
 
-	result := FormatCryptoPrices(prices)
+	result := crypto.FormatCryptoPrices(prices)
 	if !strings.Contains(result, "BTC") {
 		t.Error("missing BTC")
 	}
@@ -529,9 +541,9 @@ func TestFormatCryptoPrices(t *testing.T) {
 }
 
 func TestFormatWeather(t *testing.T) {
-	w := &WeatherData{
+	w := &weather.WeatherData{
 		Location: "New York, NY",
-		Current: CurrentWeather{
+		Current: weather.CurrentWeather{
 			Temperature: 72,
 			FeelsLike:   70,
 			Humidity:    55,
@@ -540,7 +552,7 @@ func TestFormatWeather(t *testing.T) {
 		},
 	}
 
-	result := FormatWeather(w)
+	result := weather.FormatWeather(w)
 	if !strings.Contains(result, "New York") {
 		t.Error("missing location")
 	}
@@ -553,12 +565,12 @@ func TestFormatWeather(t *testing.T) {
 }
 
 func TestFormatNewsResults(t *testing.T) {
-	articles := []NewsArticle{
+	articles := []news.NewsArticle{
 		{Title: "Go 1.23 Released", Source: "Go Blog", Description: "New features"},
 		{Title: "AI News", Source: "TechCrunch", Description: "Latest updates"},
 	}
 
-	result := FormatNewsResults(articles, "golang")
+	result := news.FormatNewsResults(articles, "golang")
 	if !strings.Contains(result, "Go 1.23") {
 		t.Error("missing article title")
 	}
@@ -578,7 +590,7 @@ func TestStripHTML(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		result := stripHTML(tt.input)
+		result := rss.StripHTML(tt.input)
 		if result != tt.expected {
 			t.Errorf("stripHTML(%q) = %q, want %q", tt.input, result, tt.expected)
 		}
@@ -598,7 +610,7 @@ func TestWMOCodeToCondition(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		result := wmoCodeToCondition(tt.code)
+		result := weather.WmoCodeToCondition(tt.code)
 		if !strings.Contains(strings.ToLower(result), strings.ToLower(tt.contains)) {
 			t.Errorf("wmoCodeToCondition(%d) = %q, want to contain %q", tt.code, result, tt.contains)
 		}
@@ -612,7 +624,7 @@ func TestWMOCodeToCondition(t *testing.T) {
 func TestWeatherIntegration(t *testing.T) {
 	// No key needed — Open-Meteo is free
 	ctx := testContext()
-	client := NewWeatherClient(false)
+	client := weather.NewWeatherClient(false)
 
 	data, err := client.GetWeather(ctx, "New York")
 	if err != nil {
@@ -636,7 +648,7 @@ func TestWeatherIntegration(t *testing.T) {
 func TestCryptoIntegration(t *testing.T) {
 	// No key needed — CoinGecko free tier
 	ctx := testContext()
-	client := NewCryptoClient(false)
+	client := crypto.NewCryptoClient(false)
 
 	prices, err := client.GetPrices(ctx, []string{"BTC", "ETH"})
 	if err != nil {
@@ -660,7 +672,7 @@ func TestCryptoIntegration(t *testing.T) {
 func TestRedditIntegration(t *testing.T) {
 	// No key needed — public JSON
 	ctx := testContext()
-	client := NewRedditClient(false)
+	client := reddit.NewRedditClient(false)
 
 	posts, err := client.SearchSubreddit(ctx, "golang", "hot", 5)
 	if err != nil {
@@ -687,7 +699,7 @@ func TestRedditIntegration(t *testing.T) {
 func TestRSSIntegration(t *testing.T) {
 	// No key needed
 	ctx := testContext()
-	client := NewRSSClient(false)
+	client := rss.NewRSSClient(false)
 
 	items, title, err := client.FetchFeed(ctx, "hn", 5)
 	if err != nil {
@@ -708,9 +720,9 @@ func TestRSSIntegration(t *testing.T) {
 func TestJobSearchIntegration(t *testing.T) {
 	skipIfNoKey(t, "SERPAPI_KEY")
 	ctx := testContext()
-	client := NewJobSearcher(os.Getenv("SERPAPI_KEY"), false)
+	client := jobsearch.NewJobSearcher(os.Getenv("SERPAPI_KEY"), false)
 
-	config := JobSearchConfig{
+	config := jobsearch.JobSearchConfig{
 		Query:    "golang developer",
 		NumPages: 1,
 	}
@@ -728,7 +740,7 @@ func TestJobSearchIntegration(t *testing.T) {
 func TestStockIntegration(t *testing.T) {
 	skipIfNoKey(t, "FINNHUB_API_KEY")
 	ctx := testContext()
-	client := NewStockClient(os.Getenv("FINNHUB_API_KEY"), "", false)
+	client := stock.NewStockClient(os.Getenv("FINNHUB_API_KEY"), "", false)
 
 	quote, err := client.GetQuote(ctx, "AAPL")
 	if err != nil {
@@ -743,7 +755,7 @@ func TestStockIntegration(t *testing.T) {
 func TestNewsIntegration(t *testing.T) {
 	skipIfNoKey(t, "GNEWS_API_KEY")
 	ctx := testContext()
-	client := NewNewsClient(os.Getenv("GNEWS_API_KEY"), "", false)
+	client := news.NewNewsClient(os.Getenv("GNEWS_API_KEY"), "", false)
 
 	articles, err := client.Search(ctx, "golang", 5)
 	if err != nil {
@@ -758,7 +770,7 @@ func TestNewsIntegration(t *testing.T) {
 func TestTwitterSearchIntegration(t *testing.T) {
 	skipIfNoKey(t, "TWITTER_BEARER_TOKEN")
 	ctx := testContext()
-	client := NewTwitterClient(false)
+	client := twitter.NewTwitterClient(false)
 
 	tweets, err := client.SearchRecent(ctx, "golang", 5)
 	if err != nil {

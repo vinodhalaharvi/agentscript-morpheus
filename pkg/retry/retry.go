@@ -40,8 +40,8 @@ func AggressiveRetryConfig() RetryConfig {
 	}
 }
 
-// isRetryableError checks if an error is worth retrying
-func isRetryableError(err error) bool {
+// IsRetryableError checks if an error is worth retrying
+func IsRetryableError(err error) bool {
 	if err == nil {
 		return false
 	}
@@ -89,7 +89,7 @@ func WithRetry[T any](ctx context.Context, config RetryConfig, name string, verb
 		lastErr = err
 
 		// Don't retry non-retryable errors
-		if !isRetryableError(err) {
+		if !IsRetryableError(err) {
 			return zero, err
 		}
 
