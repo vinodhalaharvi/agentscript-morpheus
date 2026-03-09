@@ -11,7 +11,7 @@ BINARY=agentscript
 
 # Build the binary
 build:
-	go build -o $(BINARY) .
+	go build -o $(BINARY) ./cmd/agentscript/
 
 # Run tests
 test: build
