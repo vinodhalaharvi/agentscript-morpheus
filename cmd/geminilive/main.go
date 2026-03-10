@@ -200,16 +200,20 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 func (us *UserSession) initGeminiLive() error {
 	// Parse tool definition
-	var toolDef map[string]interface{}
+	var toolDef struct {
+		Name        string        `json:"name"`
+		Description string        `json:"description"`
+		Parameters  *genai.Schema `json:"parameters"`
+	}
 	if err := json.Unmarshal([]byte(AgentScriptToolJSON), &toolDef); err != nil {
 		return fmt.Errorf("parse tool definition: %w", err)
 	}
 
 	tool := &genai.Tool{
 		FunctionDeclarations: []*genai.FunctionDeclaration{{
-			Name:        toolDef["name"].(string),
-			Description: toolDef["description"].(string),
-			Parameters:  toolDef["parameters"].(map[string]interface{}),
+			Name:        toolDef.Name,
+			Description: toolDef.Description,
+			Parameters:  toolDef.Parameters,
 		}},
 	}
 
@@ -229,6 +233,7 @@ func (us *UserSession) initGeminiLive() error {
 
 	// Set up event handlers
 	us.geminiSession.OnAudio = func(audio []byte) {
+		us.logger.Info("[DEBUG] audio received FROM Gemini", "bytes", len(audio))
 		audioB64 := base64.StdEncoding.EncodeToString(audio)
 		us.sendMessage(WSMessage{
 			Type: "audio_out",
@@ -237,6 +242,7 @@ func (us *UserSession) initGeminiLive() error {
 	}
 
 	us.geminiSession.OnText = func(text string) {
+		us.logger.Info("[DEBUG] text received FROM Gemini", "text", text)
 		us.sendMessage(WSMessage{
 			Type: "transcript",
 			Data: map[string]string{"text": text},
@@ -254,6 +260,7 @@ func (us *UserSession) initGeminiLive() error {
 	}
 
 	us.geminiSession.OnTurnDone = func() {
+		us.logger.Info("[DEBUG] Gemini turn complete")
 		us.sendMessage(WSMessage{Type: "turn_complete"})
 	}
 
@@ -374,9 +381,12 @@ func (us *UserSession) handleAudio(data interface{}) {
 		return
 	}
 
+	us.logger.Info("[DEBUG] audio received from browser", "pcm_bytes", len(pcm16))
 	// Send audio to Gemini
 	if err := us.geminiSession.SendAudio(pcm16); err != nil {
 		us.logger.Error("send audio to gemini failed", "error", err)
+	} else {
+		us.logger.Info("[DEBUG] audio sent to Gemini OK", "pcm_bytes", len(pcm16))
 	}
 }
 
@@ -561,6 +571,7 @@ func serveIndex(w http.ResponseWriter, r *http.Request) {
                     addToTranscript('🤖 ' + msg.data.text);
                     break;
                 case 'audio_out':
+                    console.log('[DEBUG] received audio_out from server, b64 len:', msg.data.audio.length);
                     playAudio(msg.data.audio);
                     break;
                 case 'error':
@@ -589,36 +600,36 @@ func serveIndex(w http.ResponseWriter, r *http.Request) {
                     mediaRecorder = new MediaRecorder(stream);
                     audioChunks = [];
 
-                    mediaRecorder.ondataavailable = (event) => {
-                        audioChunks.push(event.data);
+                    // Stream raw PCM16 at 16kHz directly to Gemini (no WAV header)
+                    const audioCtx = new AudioContext({ sampleRate: 16000 });
+                    const micSource = audioCtx.createMediaStreamSource(stream);
+                    const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+                    processor.onaudioprocess = (e) => {
+                        const float32 = e.inputBuffer.getChannelData(0);
+                        const pcm16 = new Int16Array(float32.length);
+                        for (let i = 0; i < float32.length; i++) {
+                            pcm16[i] = Math.max(-32768, Math.min(32767, float32[i] * 32768));
+                        }
+                        const base64 = btoa(String.fromCharCode(...new Uint8Array(pcm16.buffer)));
+                        if (ws.readyState === WebSocket.OPEN) {
+                            ws.send(JSON.stringify({ type: 'audio', data: { audio: base64 } }));
+                            console.log('[DEBUG] sent audio chunk, pcm16 samples:', pcm16.length);
+                        }
                     };
+                    micSource.connect(processor);
+                    processor.connect(audioCtx.destination);
+                    mediaRecorder = { stop: () => { processor.disconnect(); micSource.disconnect(); audioCtx.close(); stream.getTracks().forEach(t => t.stop()); } };
 
-                    mediaRecorder.onstop = () => {
-                        const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
-                        const reader = new FileReader();
-                        reader.onload = () => {
-                            const arrayBuffer = reader.result;
-                            // Convert to base64 for sending
-                            const base64 = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
-                            ws.send(JSON.stringify({
-                                type: 'audio',
-                                data: { audio: base64 }
-                            }));
-                        };
-                        reader.readAsArrayBuffer(audioBlob);
-                    };
-
-                    mediaRecorder.start();
                     isRecording = true;
                     micBtn.textContent = '🔴 Stop Mic';
                     addToTranscript('🎤 Listening...');
+                    console.log('[DEBUG] Mic started, streaming PCM16 at 16kHz');
                 } catch (err) {
                     console.error('Microphone access denied:', err);
                     addToTranscript('❌ Microphone access denied');
                 }
             } else {
                 mediaRecorder.stop();
-                mediaRecorder.stream.getTracks().forEach(track => track.stop());
                 isRecording = false;
                 micBtn.textContent = '🎤 Start Mic';
             }
@@ -667,20 +678,22 @@ func serveIndex(w http.ResponseWriter, r *http.Request) {
         }
 
         function playAudio(base64Audio) {
-            const audioData = atob(base64Audio);
-            const arrayBuffer = new ArrayBuffer(audioData.length);
-            const uint8Array = new Uint8Array(arrayBuffer);
-            for (let i = 0; i < audioData.length; i++) {
-                uint8Array[i] = audioData.charCodeAt(i);
+            const binary = atob(base64Audio);
+            const pcm16 = new Int16Array(binary.length / 2);
+            for (let i = 0; i < pcm16.length; i++) {
+                pcm16[i] = binary.charCodeAt(i * 2) | (binary.charCodeAt(i * 2 + 1) << 8);
             }
-            
-            const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-            audioContext.decodeAudioData(arrayBuffer).then(audioBuffer => {
-                const source = audioContext.createBufferSource();
-                source.buffer = audioBuffer;
-                source.connect(audioContext.destination);
-                source.start();
-            });
+            const sampleRate = 24000; // Gemini Live outputs at 24kHz
+            const audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate });
+            const audioBuffer = audioCtx.createBuffer(1, pcm16.length, sampleRate);
+            const channelData = audioBuffer.getChannelData(0);
+            for (let i = 0; i < pcm16.length; i++) {
+                channelData[i] = pcm16[i] / 32768.0;
+            }
+            const source = audioCtx.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(audioCtx.destination);
+            source.start();
         }
 
         // Auto-connect on load
