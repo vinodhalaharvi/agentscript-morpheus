@@ -165,10 +165,10 @@ func writeln(format string, args ...any) {
 	} else {
 		s = fmt.Sprintf(format, args...)
 	}
-	// Replace any bare \n with \r\n so raw terminal mode renders correctly
-	out := strings.ReplaceAll(s, "\r\n", "\n") // normalise first
+	out := strings.ReplaceAll(s, "\r\n", "\n")
 	out = strings.ReplaceAll(out, "\n", "\r\n")
 	fmt.Print(out + "\r\n")
+	os.Stdout.Sync()
 }
 
 // ============================================================================
@@ -343,46 +343,11 @@ func (s *Session) waitPlaybackDone() {
 	}
 }
 
-// runPlayback is the portaudio output stream callback loop.
-// It drains playQueue sequentially into the speaker.
+// runPlayback drains the playQueue into the speaker using blocking stream.Write().
 func (s *Session) runPlayback() error {
-	var buf []int16
-	bufPos := 0
+	buf := make([]int16, framesPerBuf)
 
-	stream, err := portaudio.OpenDefaultStream(
-		0, 1, float64(sampleRateOut), framesPerBuf,
-		func(out []int16) {
-			for i := range out {
-				if bufPos < len(buf) {
-					out[i] = buf[bufPos]
-					bufPos++
-				} else {
-					// try to grab next chunk from queue
-					s.playMu.Lock()
-					if len(s.playQueue) > 0 {
-						chunk := s.playQueue[0]
-						s.playQueue = s.playQueue[1:]
-						s.playMu.Unlock()
-						// convert []byte PCM16-LE to []int16
-						buf = make([]int16, len(chunk)/2)
-						for j := 0; j < len(buf); j++ {
-							buf[j] = int16(chunk[j*2]) | int16(chunk[j*2+1])<<8
-						}
-						bufPos = 0
-						if bufPos < len(buf) {
-							out[i] = buf[bufPos]
-							bufPos++
-						} else {
-							out[i] = 0
-						}
-					} else {
-						s.playMu.Unlock()
-						out[i] = 0
-					}
-				}
-			}
-		},
-	)
+	stream, err := portaudio.OpenDefaultStream(0, 1, float64(sampleRateOut), framesPerBuf, buf)
 	if err != nil {
 		return fmt.Errorf("open output stream: %w", err)
 	}
@@ -390,9 +355,63 @@ func (s *Session) runPlayback() error {
 	if err := stream.Start(); err != nil {
 		return fmt.Errorf("start output stream: %w", err)
 	}
-	<-s.ctx.Done()
-	stream.Stop()
-	return nil
+
+	var pending []int16 // leftover samples from last chunk
+
+	for {
+		select {
+		case <-s.ctx.Done():
+			stream.Stop()
+			return nil
+		default:
+		}
+
+		// Fill buf from pending + queue
+		filled := 0
+		// drain leftover first
+		if len(pending) > 0 {
+			n := copy(buf[filled:], pending)
+			filled += n
+			pending = pending[n:]
+		}
+		// pull more chunks until buf is full or queue empty
+		for filled < framesPerBuf {
+			s.playMu.Lock()
+			if len(s.playQueue) == 0 {
+				s.playMu.Unlock()
+				break
+			}
+			chunk := s.playQueue[0]
+			s.playQueue = s.playQueue[1:]
+			s.playMu.Unlock()
+
+			samples := make([]int16, len(chunk)/2)
+			for j := range samples {
+				samples[j] = int16(chunk[j*2]) | int16(chunk[j*2+1])<<8
+			}
+			n := copy(buf[filled:], samples)
+			filled += n
+			if n < len(samples) {
+				pending = samples[n:] // save overflow for next iteration
+			}
+		}
+
+		if filled == 0 {
+			// nothing to play — write silence to keep stream alive
+			for i := range buf {
+				buf[i] = 0
+			}
+		} else if filled < framesPerBuf {
+			// zero-pad remainder
+			for i := filled; i < framesPerBuf; i++ {
+				buf[i] = 0
+			}
+		}
+
+		if err := stream.Write(); err != nil {
+			s.logger.Debug("playback write error", "error", err)
+		}
+	}
 }
 
 // runMic captures mic audio and publishes to audioInBus.
@@ -473,6 +492,19 @@ func stripMarkdown(s string) string {
 	return strings.Join(out, "\n")
 }
 
+// extractFirstArg pulls the first quoted string out of a DSL line.
+func extractFirstArg(dsl string) string {
+	start := strings.Index(dsl, `"`)
+	if start < 0 {
+		return dsl
+	}
+	end := strings.Index(dsl[start+1:], `"`)
+	if end < 0 {
+		return dsl
+	}
+	return dsl[start+1 : start+1+end]
+}
+
 func (s *Session) executeDSL(callID string, args map[string]any) {
 	dslArg, ok := args["dsl"]
 	if !ok {
@@ -487,31 +519,45 @@ func (s *Session) executeDSL(callID string, args map[string]any) {
 
 	writeln("⚡ DSL: %s", dsl)
 	s.sm.Transition(StateExecutingDSL)
-	s.sendToolResponse(callID, map[string]any{"status": "executing", "dsl": dsl})
 
 	program, err := agentscript.Parse(dsl)
 	if err != nil {
-		errMsg := fmt.Sprintf("DSL parse error: %v", err)
+		errMsg := fmt.Sprintf("parse error: %v", err)
 		writeln("❌ %s", errMsg)
+		s.sendToolResponse(callID, map[string]any{"error": errMsg})
 		s.sm.Transition(StateListening)
-		s.gem.SendText("I couldn't parse the DSL pipeline: " + errMsg)
 		return
 	}
 
 	result, err := s.runtime.Execute(s.ctx, program)
 	if err != nil {
-		errMsg := fmt.Sprintf("DSL execution error: %v", err)
+		// fallback: job_search with no results → plain search
+		if strings.Contains(dsl, "job_search") && strings.Contains(err.Error(), "hasn't returned") {
+			writeln("⚠️  no results, retrying as search...")
+			fallbackDSL := `search "` + extractFirstArg(dsl) + ` jobs"`
+			writeln("⚡ Fallback: %s", fallbackDSL)
+			if fp, perr := agentscript.Parse(fallbackDSL); perr == nil {
+				result, err = s.runtime.Execute(s.ctx, fp)
+			}
+		}
+	}
+	if err != nil {
+		errMsg := fmt.Sprintf("execution error: %v", err)
 		writeln("❌ %s", errMsg)
+		s.sendToolResponse(callID, map[string]any{"error": errMsg})
 		s.sm.Transition(StateListening)
-		s.gem.SendText("The DSL pipeline failed: " + errMsg)
 		return
 	}
 
 	writeln("✅ Done")
 	writeln("%s", result)
 	s.sm.Transition(StateSpeaking)
+	// Send the clean result as the tool response — Gemini will speak it directly
 	clean := stripMarkdown(result)
-	s.gem.SendText(fmt.Sprintf("DSL result:\n\n%s\n\nSummarize this concisely in plain spoken English for voice. No markdown, no symbols.", clean))
+	s.sendToolResponse(callID, map[string]any{
+		"result":      clean,
+		"instruction": "Summarize this result concisely in plain spoken English. No markdown, no symbols, no curly braces.",
+	})
 }
 
 func (s *Session) sendToolResponse(id string, result map[string]any) {
@@ -683,6 +729,16 @@ VALID COMMANDS - USE ONLY THESE EXACT NAMES:
   news "topic"
   stock "TICKER"
   job_search "role" "location" "employment_type"
+    - location: use "remote", a real city like "New York", a real US state like "West Virginia", or "" for anywhere
+    - employment_type: "fulltime", "parttime", "contract", "internship", or "" for any
+    - if job_search fails, fall back to: search "role jobs location"
+
+CORRECT job_search EXAMPLES:
+  job_search "golang developer" "remote" "fulltime"
+  job_search "golang developer" "remote" ""
+  job_search "software engineer" "New York" "fulltime"
+  job_search "data scientist" "West Virginia" "contract"
+  job_search "python developer" "" ""
   places_search "query"
   maps_trip "title"
   reddit "subreddit"
@@ -703,10 +759,6 @@ CORRECT EXAMPLES:
   weather "New York"
   weather "London" >=> ask "Summarize in one sentence"
   ( weather "NYC" <*> crypto "BTC" ) >=> merge >=> ask "Summarize for voice"
-  job_search "golang developer" "remote" "fulltime"
-  job_search "golang developer" "remote" ""
-  job_search "software engineer" "San Francisco" "fulltime"
-  job_search "python data scientist" "" "parttime"
   search "India vs NZ cricket score" >=> ask "What is the current score?"
   news "AI" >=> summarize
 
