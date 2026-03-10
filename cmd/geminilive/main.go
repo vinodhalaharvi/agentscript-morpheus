@@ -7,199 +7,223 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
+	"time"
 
+	"github.com/gordonklaus/portaudio"
 	gl "github.com/vinodhalaharvi/agentscript/pkg/geminilive"
+	"golang.org/x/term"
 
-	"github.com/gorilla/websocket"
 	"github.com/vinodhalaharvi/agentscript/internal/agentscript"
 	"google.golang.org/genai"
 )
 
-const (
-	// System prompt for Morpheus Agent with AgentScript DSL
-	MorpheusAgentSystemPrompt = `You are Morpheus, a programmable AI agent with voice and vision. You can see through the user's camera, hear their voice, and execute complex multi-step workflows using AgentScript DSL.
+// ============================================================================
+// Generic StateMachine
+// ============================================================================
 
-CRITICAL: When users ask questions requiring data, search, or automation, compose AgentScript DSL pipelines and call the "agentscript_dsl" tool.
+type Transition[S comparable] struct {
+	From    S
+	To      S
+	OnEnter func()
+}
 
-AVAILABLE DSL COMMANDS:
-  search, ask, summarize, analyze, save, read, list, merge
-  weather, crypto, reddit, rss, news, stock, job_search
-  email, calendar, notify, places_search, maps_trip
-  image_generate, text_to_speech, translate
-
-DSL OPERATORS:
-  >=>  Sequential: command1 >=> command2 (output of cmd1 feeds cmd2)
-  <*>  Parallel: ( cmd1 <*> cmd2 <*> cmd3 ) (run all in parallel)
-  ( )  Grouping: Group parallel operations
-
-EXAMPLES:
-
-User: "What's the weather in NYC and Bitcoin price?"
-→ Call agentscript_dsl with:
-  dsl: '( weather "NYC" <*> crypto "BTC" ) >=> merge >=> ask "Summarize weather and crypto in 2 sentences"'
-
-User: "Search for restaurants near me and put them on a map"  
-→ Call agentscript_dsl with:
-  dsl: 'places_search "restaurants near Reston VA" >=> maps_trip "Restaurants Near Me"'
-
-User: "Find golang jobs and email me the results"
-→ Call agentscript_dsl with:
-  dsl: 'job_search "golang developer" "remote" >=> ask "Format as table with company, role, salary" >=> email "user@gmail.com"'
-
-User: "Get India vs NZ cricket score and notify me on Slack"
-→ Call agentscript_dsl with:
-  dsl: 'search "India vs New Zealand live cricket score" >=> ask "Extract current score and status" >=> notify "slack"'
-
-RULES:
-- For current info (weather, news, scores, prices) → ALWAYS use DSL
-- For data analysis or automation → ALWAYS use DSL  
-- For simple facts you know → answer directly
-- Keep DSL concise (2-5 commands max)
-- Use >=> ask "..." >=> to format results for speech
-- After DSL execution, respond conversationally based on results
-
-When you see images through camera, describe what you see and offer DSL actions if relevant.`
-
-	// Tool definition for AgentScript DSL execution
-	AgentScriptToolJSON = `{
-		"name": "agentscript_dsl",
-		"description": "Execute AgentScript DSL pipeline for data fetching, analysis, automation. Use >=> for sequential, <*> for parallel operations.",
-		"parameters": {
-			"type": "object",
-			"properties": {
-				"dsl": {
-					"type": "string",
-					"description": "AgentScript DSL command. Example: weather \"NYC\" >=> ask \"Summarize for voice\" or ( search \"news\" <*> crypto \"BTC\" ) >=> merge"
-				}
-			},
-			"required": ["dsl"]
-		}
-	}`
-)
-
-// Server handles WebSocket connections and Gemini Live integration
-type Server struct {
-	upgrader websocket.Upgrader
-	runtime  *agentscript.Runtime
+type StateMachine[S comparable] struct {
+	current  atomic.Int64
+	states   []S
+	stateIdx map[S]int64
+	allowed  map[S]map[S]func()
+	mu       sync.Mutex
 	logger   *slog.Logger
 }
 
-// UserSession manages a single user's live session
-type UserSession struct {
-	conn          *websocket.Conn
-	geminiSession *gl.LiveSession // Use the imported LiveSession from live.go
-	ctx           context.Context
-	cancel        context.CancelFunc
-	logger        *slog.Logger
-	runtime       *agentscript.Runtime
-	mu            sync.Mutex
+func NewStateMachine[S comparable](initial S, logger *slog.Logger) *StateMachine[S] {
+	sm := &StateMachine[S]{
+		states:   []S{initial},
+		stateIdx: map[S]int64{initial: 0},
+		allowed:  map[S]map[S]func(){},
+		logger:   logger,
+	}
+	sm.current.Store(0)
+	return sm
 }
 
-// WebSocket message types
-type WSMessage struct {
-	Type string      `json:"type"`
-	Data interface{} `json:"data,omitempty"`
+func (sm *StateMachine[S]) Register(from, to S, onEnter func()) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if _, ok := sm.stateIdx[to]; !ok {
+		sm.stateIdx[to] = int64(len(sm.states))
+		sm.states = append(sm.states, to)
+	}
+	if _, ok := sm.allowed[from]; !ok {
+		sm.allowed[from] = map[S]func(){}
+	}
+	sm.allowed[from][to] = onEnter
 }
 
-// Audio message from browser
-type AudioMessage struct {
-	Audio string `json:"audio"` // base64 PCM16
+func (sm *StateMachine[S]) State() S {
+	return sm.states[sm.current.Load()]
 }
 
-// Image message from browser (screenshot)
-type ImageMessage struct {
-	Image string `json:"image"` // base64 JPEG
+func (sm *StateMachine[S]) Transition(to S) bool {
+	sm.mu.Lock()
+	cur := sm.states[sm.current.Load()]
+	toIdx, knownTo := sm.stateIdx[to]
+	onEnter, allowed := sm.allowed[cur][to]
+	sm.mu.Unlock()
+
+	if !knownTo || !allowed {
+		sm.logger.Debug("rejected state transition", "from", fmt.Sprint(cur), "to", fmt.Sprint(to))
+		return false
+	}
+	sm.current.Store(toIdx)
+	if onEnter != nil {
+		onEnter()
+	}
+	return true
 }
 
-func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+func (sm *StateMachine[S]) Is(s S) bool { return sm.State() == s }
 
-	// Initialize AgentScript runtime
-	cfg := agentscript.RuntimeConfig{
-		GeminiAPIKey: os.Getenv("GEMINI_API_KEY"),
-		ClaudeAPIKey: os.Getenv("CLAUDE_API_KEY"),
-		Verbose:      true,
+// ============================================================================
+// Generic Handler + Filter + Bus
+// ============================================================================
+
+type Handler[I, O any] func(ctx context.Context, input I) (O, error)
+
+func Filter[I, O any](h Handler[I, O], pred func(I) bool) Handler[I, O] {
+	return func(ctx context.Context, input I) (O, error) {
+		if !pred(input) {
+			var zero O
+			return zero, nil
+		}
+		return h(ctx, input)
 	}
-
-	ctx := context.Background()
-	runtime, err := agentscript.NewRuntime(ctx, cfg)
-	if err != nil {
-		log.Fatal("Failed to create runtime:", err)
-	}
-
-	server := &Server{
-		upgrader: websocket.Upgrader{
-			CheckOrigin: func(r *http.Request) bool { return true },
-		},
-		runtime: runtime,
-		logger:  logger,
-	}
-
-	// Serve static files
-	http.HandleFunc("/", serveIndex)
-	http.HandleFunc("/ws", server.handleWebSocket)
-
-	port := "8080"
-	if p := os.Getenv("PORT"); p != "" {
-		port = p
-	}
-
-	logger.Info("Starting Gemini Live server", "port", port)
-
-	// Handle shutdown
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-c
-		logger.Info("Shutting down...")
-		os.Exit(0)
-	}()
-
-	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
 
-func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	conn, err := s.upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		s.logger.Error("websocket upgrade failed", "error", err)
-		return
-	}
-	defer conn.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	session := &UserSession{
-		conn:    conn,
-		ctx:     ctx,
-		cancel:  cancel,
-		logger:  s.logger,
-		runtime: s.runtime,
-	}
-
-	// Initialize Gemini Live session
-	if err := session.initGeminiLive(); err != nil {
-		s.logger.Error("failed to init gemini live", "error", err)
-		session.sendError("Failed to connect to Gemini Live")
-		return
-	}
-	defer session.closeGeminiLive()
-
-	// Send ready status
-	session.sendStatus("live")
-
-	// Handle WebSocket messages
-	session.handleMessages()
+type Bus[T any] struct {
+	ch       chan T
+	handlers []Handler[T, struct{}]
 }
 
-func (us *UserSession) initGeminiLive() error {
-	// Parse tool definition
+func NewBus[T any](buf int) *Bus[T] {
+	return &Bus[T]{ch: make(chan T, buf)}
+}
+
+func (b *Bus[T]) Subscribe(h Handler[T, struct{}]) {
+	b.handlers = append(b.handlers, h)
+}
+
+func (b *Bus[T]) Publish(payload T) {
+	select {
+	case b.ch <- payload:
+	default:
+	}
+}
+
+func (b *Bus[T]) Run(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case p := <-b.ch:
+			for _, h := range b.handlers {
+				h(ctx, p) //nolint:errcheck
+			}
+		}
+	}
+}
+
+// ============================================================================
+// Session state
+// ============================================================================
+
+type SessionState int32
+
+const (
+	StateIdle         SessionState = iota
+	StateListening                 // mic active, forwarding to Gemini
+	StateSpeaking                  // playing Gemini audio
+	StateExecutingDSL              // DSL pipeline running
+)
+
+func (s SessionState) String() string {
+	return [...]string{"idle", "listening", "speaking", "executing_dsl"}[s]
+}
+
+// ============================================================================
+// Audio constants
+// ============================================================================
+
+const (
+	sampleRateIn  = 16000 // Gemini expects 16kHz PCM16
+	sampleRateOut = 24000 // Gemini returns 24kHz PCM16
+	framesPerBuf  = 4096
+)
+
+// ============================================================================
+// Session
+// ============================================================================
+
+type Session struct {
+	ctx     context.Context
+	cancel  context.CancelFunc
+	logger  *slog.Logger
+	runtime *agentscript.Runtime
+	gem     *gl.LiveSession
+	sm      *StateMachine[SessionState]
+
+	// typed event buses
+	audioInBus  *Bus[[]byte] // raw PCM16 from mic → Gemini
+	audioOutBus *Bus[[]byte] // raw PCM16 from Gemini → speaker
+
+	// playback queue
+	playMu     sync.Mutex
+	playQueue  [][]byte
+	playNotify chan struct{}
+
+	// mic gate
+	muted atomic.Bool
+}
+
+func newSession(ctx context.Context, cancel context.CancelFunc, runtime *agentscript.Runtime, logger *slog.Logger) *Session {
+	s := &Session{
+		ctx:         ctx,
+		cancel:      cancel,
+		logger:      logger,
+		runtime:     runtime,
+		audioInBus:  NewBus[[]byte](64),
+		audioOutBus: NewBus[[]byte](128),
+		playNotify:  make(chan struct{}, 1),
+	}
+	s.sm = NewStateMachine[SessionState](StateIdle, logger)
+	s.registerTransitions()
+	return s
+}
+
+func (s *Session) registerTransitions() {
+	print := func(msg string) func() {
+		return func() { fmt.Println(msg) }
+	}
+	s.sm.Register(StateIdle, StateListening, print("🎤 Listening..."))
+	s.sm.Register(StateListening, StateSpeaking, print("🔊 Speaking..."))
+	s.sm.Register(StateListening, StateExecutingDSL, print("⚙️  Executing DSL..."))
+	s.sm.Register(StateSpeaking, StateListening, print("🎤 Listening..."))
+	s.sm.Register(StateSpeaking, StateExecutingDSL, print("⚙️  Executing DSL..."))
+	s.sm.Register(StateExecutingDSL, StateSpeaking, print("🔊 Speaking..."))
+	s.sm.Register(StateExecutingDSL, StateListening, print("🎤 Listening..."))
+}
+
+// ============================================================================
+// Gemini wiring
+// ============================================================================
+
+func (s *Session) connect() error {
 	var toolDef struct {
 		Name        string        `json:"name"`
 		Description string        `json:"description"`
@@ -209,499 +233,449 @@ func (us *UserSession) initGeminiLive() error {
 		return fmt.Errorf("parse tool definition: %w", err)
 	}
 
-	tool := &genai.Tool{
-		FunctionDeclarations: []*genai.FunctionDeclaration{{
-			Name:        toolDef.Name,
-			Description: toolDef.Description,
-			Parameters:  toolDef.Parameters,
-		}},
-	}
-
-	config := gl.LiveConfig{
+	gem, err := gl.NewLiveSession(s.ctx, gl.LiveConfig{
 		SystemPrompt: MorpheusAgentSystemPrompt,
-		VoiceName:    "Puck", // or "Charon", "Kore", "Fenrir"
-		Tools:        []*genai.Tool{tool},
-	}
-
-	// Create LiveSession using the imported implementation
-	session, err := gl.NewLiveSession(us.ctx, config, us.logger)
+		VoiceName:    "Puck",
+		Tools: []*genai.Tool{{
+			FunctionDeclarations: []*genai.FunctionDeclaration{{
+				Name:        toolDef.Name,
+				Description: toolDef.Description,
+				Parameters:  toolDef.Parameters,
+			}},
+		}},
+	}, s.logger)
 	if err != nil {
-		return fmt.Errorf("create live session: %w", err)
+		return fmt.Errorf("connect to Gemini Live: %w", err)
+	}
+	s.gem = gem
+
+	// Gemini audio → playback queue
+	s.gem.OnAudio = func(audio []byte) {
+		s.sm.Transition(StateSpeaking)
+		s.enqueueAudio(audio)
 	}
 
-	us.geminiSession = session
-
-	// Set up event handlers
-	us.geminiSession.OnAudio = func(audio []byte) {
-		us.logger.Info("[DEBUG] audio received FROM Gemini", "bytes", len(audio))
-		audioB64 := base64.StdEncoding.EncodeToString(audio)
-		us.sendMessage(WSMessage{
-			Type: "audio_out",
-			Data: map[string]string{"audio": audioB64},
-		})
+	s.gem.OnText = func(text string) {
+		fmt.Printf("💬 %s\n", text)
 	}
 
-	us.geminiSession.OnText = func(text string) {
-		us.logger.Info("[DEBUG] text received FROM Gemini", "text", text)
-		us.sendMessage(WSMessage{
-			Type: "transcript",
-			Data: map[string]string{"text": text},
-		})
-	}
-
-	us.geminiSession.OnToolCall = func(id, name string, args map[string]any) {
+	s.gem.OnToolCall = func(id, name string, args map[string]any) {
 		if name == "agentscript_dsl" {
-			go us.executeDSL(id, args)
+			go s.executeDSL(id, args)
 		}
 	}
 
-	us.geminiSession.OnInterrupt = func() {
-		us.sendMessage(WSMessage{Type: "interrupted"})
+	// Barge-in: user spoke while Gemini was speaking — drain playback queue
+	s.gem.OnInterrupt = func() {
+		fmt.Println("⏸  Interrupted")
+		s.drainAudio()
+		s.sm.Transition(StateListening)
 	}
 
-	us.geminiSession.OnTurnDone = func() {
-		us.logger.Info("[DEBUG] Gemini turn complete")
-		us.sendMessage(WSMessage{Type: "turn_complete"})
+	s.gem.OnTurnDone = func() {
+		// wait for playback to finish, then go back to listening
+		go func() {
+			s.waitPlaybackDone()
+			s.sm.Transition(StateListening)
+		}()
 	}
 
-	// Start receiving from Gemini
-	us.geminiSession.StartReceiving(us.ctx)
+	// Wire audioInBus: always forward mic → Gemini
+	// Gemini's own VAD handles barge-in; we don't gate on state here
+	s.audioInBus.Subscribe(Handler[[]byte, struct{}](func(ctx context.Context, pcm []byte) (struct{}, error) {
+		if err := s.gem.SendAudio(pcm); err != nil {
+			s.logger.Debug("send audio failed", "error", err)
+		}
+		return struct{}{}, nil
+	}))
 
+	go s.audioInBus.Run(s.ctx)
+	go s.audioOutBus.Run(s.ctx)
+	s.gem.StartReceiving(s.ctx)
+	s.sm.Transition(StateListening)
 	return nil
 }
 
-func (us *UserSession) executeDSL(callID string, args map[string]interface{}) {
-	dslArg, ok := args["dsl"]
-	if !ok {
-		us.sendToolResponse(callID, map[string]interface{}{
-			"error": "missing dsl parameter",
-		})
-		return
-	}
+// ============================================================================
+// Audio playback queue — sequential, interruptible
+// ============================================================================
 
-	dsl, ok := dslArg.(string)
-	if !ok {
-		us.sendToolResponse(callID, map[string]interface{}{
-			"error": "dsl parameter must be string",
-		})
-		return
-	}
-
-	us.logger.Info("executing DSL", "dsl", dsl, "call_id", callID)
-
-	// Send placeholder response to unblock audio
-	us.sendToolResponse(callID, map[string]interface{}{
-		"status": "executing DSL pipeline...",
-		"dsl":    dsl,
-	})
-
-	// Parse and execute DSL
-	program, err := agentscript.Parse(dsl)
-	if err != nil {
-		result := map[string]interface{}{
-			"error": fmt.Sprintf("DSL parse error: %v", err),
-			"dsl":   dsl,
-		}
-		us.sendToolResponse(callID, result)
-		return
-	}
-
-	result, err := us.runtime.Execute(us.ctx, program)
-	if err != nil {
-		errorResult := map[string]interface{}{
-			"error": fmt.Sprintf("DSL execution error: %v", err),
-			"dsl":   dsl,
-		}
-		us.sendToolResponse(callID, errorResult)
-		return
-	}
-
-	// Send final result
-	finalResponse := map[string]interface{}{
-		"success": true,
-		"result":  result,
-		"dsl":     dsl,
-		"summary": fmt.Sprintf("Successfully executed: %s", dsl),
-	}
-
-	us.sendToolResponse(callID, finalResponse)
-
-	// Inject result back to Gemini for vocalization
-	us.geminiSession.SendText(fmt.Sprintf("DSL execution completed successfully. Here are the results: %s", result))
-
-	us.logger.Info("DSL executed successfully", "dsl", dsl, "result_length", len(result))
-}
-
-func (us *UserSession) sendToolResponse(id string, result map[string]interface{}) {
-	if err := us.geminiSession.SendToolResponse(id, result); err != nil {
-		us.logger.Error("send tool response failed", "error", err)
+func (s *Session) enqueueAudio(pcm []byte) {
+	s.playMu.Lock()
+	s.playQueue = append(s.playQueue, pcm)
+	s.playMu.Unlock()
+	select {
+	case s.playNotify <- struct{}{}:
+	default:
 	}
 }
 
-func (us *UserSession) handleMessages() {
+func (s *Session) drainAudio() {
+	s.playMu.Lock()
+	s.playQueue = nil
+	s.playMu.Unlock()
+}
+
+func (s *Session) waitPlaybackDone() {
 	for {
-		var msg WSMessage
-		if err := us.conn.ReadJSON(&msg); err != nil {
-			if websocket.IsCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
-				return
-			}
-			us.logger.Error("websocket read error", "error", err)
+		s.playMu.Lock()
+		empty := len(s.playQueue) == 0
+		s.playMu.Unlock()
+		if empty {
 			return
 		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
 
-		switch msg.Type {
-		case "audio":
-			us.handleAudio(msg.Data)
-		case "image":
-			us.handleImage(msg.Data)
-		case "text":
-			us.handleText(msg.Data)
-		case "screenshot":
-			us.takeScreenshot()
+// runPlayback is the portaudio output stream callback loop.
+// It drains playQueue sequentially into the speaker.
+func (s *Session) runPlayback() error {
+	var buf []int16
+	bufPos := 0
+
+	stream, err := portaudio.OpenDefaultStream(
+		0, 1, float64(sampleRateOut), framesPerBuf,
+		func(out []int16) {
+			for i := range out {
+				if bufPos < len(buf) {
+					out[i] = buf[bufPos]
+					bufPos++
+				} else {
+					// try to grab next chunk from queue
+					s.playMu.Lock()
+					if len(s.playQueue) > 0 {
+						chunk := s.playQueue[0]
+						s.playQueue = s.playQueue[1:]
+						s.playMu.Unlock()
+						// convert []byte PCM16-LE to []int16
+						buf = make([]int16, len(chunk)/2)
+						for j := 0; j < len(buf); j++ {
+							buf[j] = int16(chunk[j*2]) | int16(chunk[j*2+1])<<8
+						}
+						bufPos = 0
+						if bufPos < len(buf) {
+							out[i] = buf[bufPos]
+							bufPos++
+						} else {
+							out[i] = 0
+						}
+					} else {
+						s.playMu.Unlock()
+						out[i] = 0
+					}
+				}
+			}
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("open output stream: %w", err)
+	}
+	defer stream.Close()
+	if err := stream.Start(); err != nil {
+		return fmt.Errorf("start output stream: %w", err)
+	}
+	<-s.ctx.Done()
+	stream.Stop()
+	return nil
+}
+
+// runMic captures mic audio and publishes to audioInBus.
+func (s *Session) runMic() error {
+	buf := make([]int16, framesPerBuf)
+
+	stream, err := portaudio.OpenDefaultStream(
+		1, 0, float64(sampleRateIn), framesPerBuf, buf,
+	)
+	if err != nil {
+		return fmt.Errorf("open input stream: %w", err)
+	}
+	defer stream.Close()
+	if err := stream.Start(); err != nil {
+		return fmt.Errorf("start input stream: %w", err)
+	}
+
+	for {
+		select {
+		case <-s.ctx.Done():
+			stream.Stop()
+			return nil
 		default:
-			us.logger.Warn("unknown message type", "type", msg.Type)
+		}
+		if err := stream.Read(); err != nil {
+			s.logger.Debug("mic read error", "error", err)
+			continue
+		}
+		// convert []int16 → []byte PCM16-LE
+		pcm := make([]byte, len(buf)*2)
+		for i, v := range buf {
+			pcm[i*2] = byte(v)
+			pcm[i*2+1] = byte(v >> 8)
+		}
+		if !s.muted.Load() {
+			s.audioInBus.Publish(pcm)
 		}
 	}
 }
 
-func (us *UserSession) handleAudio(data interface{}) {
-	audioData, ok := data.(map[string]interface{})
+// ============================================================================
+// DSL execution
+// ============================================================================
+
+func (s *Session) executeDSL(callID string, args map[string]any) {
+	dslArg, ok := args["dsl"]
 	if !ok {
+		s.sendToolResponse(callID, map[string]any{"error": "missing dsl parameter"})
+		return
+	}
+	dsl, ok := dslArg.(string)
+	if !ok {
+		s.sendToolResponse(callID, map[string]any{"error": "dsl must be string"})
 		return
 	}
 
-	audioB64, ok := audioData["audio"].(string)
-	if !ok {
-		return
-	}
+	fmt.Printf("⚡ DSL: %s\n", dsl)
+	s.sm.Transition(StateExecutingDSL)
+	s.sendToolResponse(callID, map[string]any{"status": "executing", "dsl": dsl})
 
-	pcm16, err := base64.StdEncoding.DecodeString(audioB64)
+	program, err := agentscript.Parse(dsl)
 	if err != nil {
-		us.logger.Error("decode audio failed", "error", err)
+		errMsg := fmt.Sprintf("DSL parse error: %v", err)
+		fmt.Printf("❌ %s\n", errMsg)
+		s.sm.Transition(StateListening)
+		s.gem.SendText("I couldn't parse the DSL pipeline: " + errMsg)
 		return
 	}
 
-	us.logger.Info("[DEBUG] audio received from browser", "pcm_bytes", len(pcm16))
-	// Send audio to Gemini
-	if err := us.geminiSession.SendAudio(pcm16); err != nil {
-		us.logger.Error("send audio to gemini failed", "error", err)
-	} else {
-		us.logger.Info("[DEBUG] audio sent to Gemini OK", "pcm_bytes", len(pcm16))
+	result, err := s.runtime.Execute(s.ctx, program)
+	if err != nil {
+		errMsg := fmt.Sprintf("DSL execution error: %v", err)
+		fmt.Printf("❌ %s\n", errMsg)
+		s.sm.Transition(StateListening)
+		s.gem.SendText("The DSL pipeline failed: " + errMsg)
+		return
+	}
+
+	fmt.Printf("✅ DSL done (%d bytes)\n", len(result))
+	s.sm.Transition(StateSpeaking)
+	s.gem.SendText(fmt.Sprintf("DSL pipeline completed. Results:\n\n%s\n\nPlease summarize concisely for voice.", result))
+}
+
+func (s *Session) sendToolResponse(id string, result map[string]any) {
+	if err := s.gem.SendToolResponse(id, result); err != nil {
+		s.logger.Debug("send tool response failed", "error", err)
 	}
 }
 
-func (us *UserSession) handleImage(data interface{}) {
-	imageData, ok := data.(map[string]interface{})
-	if !ok {
-		return
-	}
+// ============================================================================
+// Screenshot
+// ============================================================================
 
-	imageB64, ok := imageData["image"].(string)
-	if !ok {
-		return
-	}
-
-	// Send image to Gemini
-	if err := us.geminiSession.SendImage(imageB64); err != nil {
-		us.logger.Error("send image to gemini failed", "error", err)
-	}
-}
-
-func (us *UserSession) handleText(data interface{}) {
-	textData, ok := data.(map[string]interface{})
-	if !ok {
-		return
-	}
-
-	text, ok := textData["text"].(string)
-	if !ok {
-		return
-	}
-
-	us.geminiSession.SendText(text)
-}
-
-func (us *UserSession) takeScreenshot() {
-	// Take screenshot using screencapture on macOS
-	cmd := exec.Command("screencapture", "-t", "jpg", "-x", "/tmp/screenshot.jpg")
+func (s *Session) takeScreenshot() {
+	fmt.Println("📸 Taking screenshot...")
+	cmd := exec.Command("screencapture", "-t", "jpg", "-x", "/tmp/morpheus_screenshot.jpg")
 	if err := cmd.Run(); err != nil {
-		us.logger.Error("screenshot failed", "error", err)
+		fmt.Printf("❌ Screenshot failed: %v\n", err)
 		return
 	}
-
-	// Read screenshot
-	data, err := os.ReadFile("/tmp/screenshot.jpg")
+	data, err := os.ReadFile("/tmp/morpheus_screenshot.jpg")
 	if err != nil {
-		us.logger.Error("read screenshot failed", "error", err)
+		fmt.Printf("❌ Read screenshot failed: %v\n", err)
 		return
 	}
-
-	// Convert to base64 and send
 	imageB64 := base64.StdEncoding.EncodeToString(data)
-	if err := us.geminiSession.SendImage(imageB64); err != nil {
-		us.logger.Error("send screenshot failed", "error", err)
+	if err := s.gem.SendImage(imageB64); err != nil {
+		fmt.Printf("❌ Send screenshot failed: %v\n", err)
+		return
+	}
+	fmt.Println("📸 Screenshot sent")
+	s.gem.SendText("I just took a screenshot of my screen. What do you see and what actions can you help with?")
+	os.Remove("/tmp/morpheus_screenshot.jpg")
+}
+
+// ============================================================================
+// Main
+// ============================================================================
+
+func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	geminiKey := os.Getenv("GEMINI_API_KEY")
+	if geminiKey == "" {
+		log.Fatal("GEMINI_API_KEY not set")
 	}
 
-	// Also send context
-	us.geminiSession.SendText("I just took a screenshot of my current screen. What do you see and what actions can you help me with?")
-
-	// Clean up
-	os.Remove("/tmp/screenshot.jpg")
-}
-
-func (us *UserSession) sendMessage(msg WSMessage) {
-	us.mu.Lock()
-	defer us.mu.Unlock()
-	if err := us.conn.WriteJSON(msg); err != nil {
-		us.logger.Error("websocket write failed", "error", err)
+	googleCreds := os.Getenv("GOOGLE_CREDENTIALS_FILE")
+	if googleCreds == "" {
+		if _, err := os.Stat("credentials.json"); err == nil {
+			googleCreds = "credentials.json"
+		}
 	}
-}
-
-func (us *UserSession) sendStatus(status string) {
-	us.sendMessage(WSMessage{Type: "status", Data: status})
-}
-
-func (us *UserSession) sendError(error string) {
-	us.sendMessage(WSMessage{Type: "error", Data: error})
-}
-
-func (us *UserSession) closeGeminiLive() {
-	if us.geminiSession != nil {
-		us.geminiSession.Close()
+	searchKey := os.Getenv("SEARCH_API_KEY")
+	if searchKey == "" {
+		searchKey = os.Getenv("SERPAPI_KEY")
 	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	runtime, err := agentscript.NewRuntime(ctx, agentscript.RuntimeConfig{
+		GeminiAPIKey:       geminiKey,
+		ClaudeAPIKey:       os.Getenv("CLAUDE_API_KEY"),
+		SearchAPIKey:       searchKey,
+		GoogleCredsFile:    googleCreds,
+		GoogleTokenFile:    os.Getenv("GOOGLE_TOKEN_FILE"),
+		GitHubClientID:     os.Getenv("GITHUB_CLIENT_ID"),
+		GitHubClientSecret: os.Getenv("GITHUB_CLIENT_SECRET"),
+		GitHubTokenFile:    os.Getenv("GITHUB_TOKEN_FILE"),
+		Verbose:            false,
+	})
+	if err != nil {
+		log.Fatal("failed to create runtime:", err)
+	}
+
+	// Init portaudio
+	if err := portaudio.Initialize(); err != nil {
+		log.Fatal("portaudio init failed:", err)
+	}
+	defer portaudio.Terminate()
+
+	sess := newSession(ctx, cancel, runtime, logger)
+
+	fmt.Println("🚀 Morpheus — AgentScript Live")
+	fmt.Println("   Connecting to Gemini Live...")
+
+	if err := sess.connect(); err != nil {
+		log.Fatal("connect failed:", err)
+	}
+	fmt.Println("🟢 Connected. Controls: [SPACE] mute/unmute  [S] screenshot  [Ctrl+C] quit")
+
+	// Handle signals
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+
+	// Run mic and playback concurrently
+	errCh := make(chan error, 2)
+	go func() { errCh <- sess.runMic() }()
+	go func() { errCh <- sess.runPlayback() }()
+
+	// Raw terminal — single keypress without Enter
+	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+	if err != nil {
+		fmt.Println("⚠️  Could not set raw terminal, using line mode (press Enter after key)")
+	}
+	go func() {
+		buf := make([]byte, 1)
+		for {
+			n, _ := os.Stdin.Read(buf)
+			if n == 0 {
+				continue
+			}
+			switch buf[0] {
+			case ' ':
+				if sess.muted.Load() {
+					sess.muted.Store(false)
+					fmt.Println("\r🎤 Unmuted")
+				} else {
+					sess.muted.Store(true)
+					fmt.Println("\r🔇 Muted")
+				}
+			case 's', 'S':
+				go sess.takeScreenshot()
+			case 3: // Ctrl+C
+				cancel()
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-sig:
+		fmt.Println("\n👋 Shutting down...")
+		cancel()
+	case err := <-errCh:
+		if err != nil {
+			fmt.Printf("❌ Audio error: %v\n", err)
+		}
+		cancel()
+	}
+
+	if oldState != nil {
+		term.Restore(int(os.Stdin.Fd()), oldState)
+	}
+	sess.gem.Close()
 }
 
-func serveIndex(w http.ResponseWriter, r *http.Request) {
-	html := `<!DOCTYPE html>
-<html>
-<head>
-    <title>AgentScript Live</title>
-    <meta charset="utf-8">
-    <style>
-        body { font-family: Arial, sans-serif; padding: 20px; background: #1a1a1a; color: #fff; }
-        .container { max-width: 800px; margin: 0 auto; }
-        .status { padding: 10px; border-radius: 5px; margin: 10px 0; }
-        .live { background: #2d5016; }
-        .connecting { background: #ffa500; color: #000; }
-        .error { background: #8b0000; }
-        button { padding: 10px 20px; margin: 5px; border: none; border-radius: 5px; cursor: pointer; }
-        .primary { background: #4CAF50; color: white; }
-        .secondary { background: #2196F3; color: white; }
-        .danger { background: #f44336; color: white; }
-        #transcript { background: #333; padding: 15px; border-radius: 5px; min-height: 200px; margin: 10px 0; }
-        #controls { text-align: center; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>🚀 AgentScript Live</h1>
-        <p>Voice + Vision AI Agent with Morpheus DSL</p>
-        
-        <div id="status" class="status connecting">Connecting...</div>
-        
-        <div id="controls">
-            <button id="connectBtn" class="primary">Connect</button>
-            <button id="micBtn" class="secondary" disabled>🎤 Start Mic</button>
-            <button id="screenshotBtn" class="secondary" disabled>📸 Screenshot</button>
-            <button id="cameraBtn" class="secondary" disabled>📹 Camera</button>
-        </div>
-        
-        <div id="transcript">
-            <p>Ready to assist! Try saying:</p>
-            <ul>
-                <li>"What's the weather in New York?"</li>
-                <li>"Search for golang jobs and email me"</li>
-                <li>"Take a screenshot and tell me what you see"</li>
-                <li>"Find restaurants near me and put them on a map"</li>
-            </ul>
-        </div>
-    </div>
+// ============================================================================
+// Constants
+// ============================================================================
 
-    <script>
-        let ws = null;
-        let mediaRecorder = null;
-        let audioChunks = [];
-        let isRecording = false;
+const (
+	MorpheusAgentSystemPrompt = `You are Morpheus, a voice AI agent. Execute tasks using AgentScript DSL by calling the "agentscript_dsl" tool.
 
-        const statusDiv = document.getElementById('status');
-        const transcriptDiv = document.getElementById('transcript');
-        const connectBtn = document.getElementById('connectBtn');
-        const micBtn = document.getElementById('micBtn');
-        const screenshotBtn = document.getElementById('screenshotBtn');
-        const cameraBtn = document.getElementById('cameraBtn');
+DSL GRAMMAR - FOLLOW EXACTLY, NO VARIATIONS:
+  Syntax: command "arg1" "arg2"
+  NO dots. NO parens. NO equals signs. NO semicolons.
 
-        connectBtn.addEventListener('click', connect);
-        micBtn.addEventListener('click', toggleMic);
-        screenshotBtn.addEventListener('click', takeScreenshot);
-        cameraBtn.addEventListener('click', startCamera);
+SEQUENTIAL (pipe output into next command):
+  command1 "arg" >=> command2 "arg"
 
-        function connect() {
-            ws = new WebSocket('ws://localhost:8080/ws');
-            
-            ws.onopen = () => {
-                updateStatus('Connecting to Gemini Live...', 'connecting');
-                connectBtn.disabled = true;
-            };
-            
-            ws.onmessage = (event) => {
-                const msg = JSON.parse(event.data);
-                handleMessage(msg);
-            };
-            
-            ws.onclose = () => {
-                updateStatus('Disconnected', 'error');
-                connectBtn.disabled = false;
-                micBtn.disabled = true;
-                screenshotBtn.disabled = true;
-                cameraBtn.disabled = true;
-            };
-        }
+PARALLEL (run simultaneously):
+  ( command1 "arg" <*> command2 "arg" ) >=> merge
 
-        function handleMessage(msg) {
-            switch(msg.type) {
-                case 'status':
-                    if(msg.data === 'live') {
-                        updateStatus('🟢 Connected - Ready for voice!', 'live');
-                        micBtn.disabled = false;
-                        screenshotBtn.disabled = false;
-                        cameraBtn.disabled = false;
-                    }
-                    break;
-                case 'transcript':
-                    addToTranscript('🤖 ' + msg.data.text);
-                    break;
-                case 'audio_out':
-                    console.log('[DEBUG] received audio_out from server, b64 len:', msg.data.audio.length);
-                    playAudio(msg.data.audio);
-                    break;
-                case 'error':
-                    addToTranscript('❌ Error: ' + msg.data);
-                    break;
-                case 'interrupted':
-                    addToTranscript('⏸️ Interrupted');
-                    break;
-            }
-        }
+VALID COMMANDS - USE ONLY THESE EXACT NAMES:
+  weather "city"
+  crypto "SYMBOL"
+  search "query"
+  news "topic"
+  stock "TICKER"
+  job_search "role" "location"
+  places_search "query"
+  maps_trip "title"
+  reddit "subreddit"
+  rss "url"
+  ask "question"
+  summarize
+  analyze "focus"
+  save "filename"
+  read "filename"
+  email "address"
+  notify "channel"
+  translate "language"
+  image_generate "prompt"
+  text_to_speech "text"
+  merge
 
-        function updateStatus(text, className) {
-            statusDiv.textContent = text;
-            statusDiv.className = 'status ' + className;
-        }
+CORRECT EXAMPLES:
+  weather "New York"
+  weather "London" >=> ask "Summarize in one sentence"
+  ( weather "NYC" <*> crypto "BTC" ) >=> merge >=> ask "Summarize for voice"
+  job_search "golang developer" "remote"
+  search "India vs NZ cricket score" >=> ask "What is the current score?"
+  news "AI" >=> summarize
 
-        function addToTranscript(text) {
-            transcriptDiv.innerHTML += '<p>' + text + '</p>';
-            transcriptDiv.scrollTop = transcriptDiv.scrollHeight;
-        }
+WRONG - NEVER DO THIS:
+  weather.current_weather(city="New York")   <- no dots or parens
+  weather city="New York"                    <- no equals signs
+  cmd1; cmd2                                 <- use >=> not semicolons
 
-        async function toggleMic() {
-            if (!isRecording) {
-                try {
-                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                    mediaRecorder = new MediaRecorder(stream);
-                    audioChunks = [];
+RULES:
+- For current info (weather, news, prices) -> ALWAYS use DSL
+- For simple conversational questions -> answer directly without DSL
+- After DSL completes, respond conversationally based on results`
 
-                    // Stream raw PCM16 at 16kHz directly to Gemini (no WAV header)
-                    const audioCtx = new AudioContext({ sampleRate: 16000 });
-                    const micSource = audioCtx.createMediaStreamSource(stream);
-                    const processor = audioCtx.createScriptProcessor(4096, 1, 1);
-                    processor.onaudioprocess = (e) => {
-                        const float32 = e.inputBuffer.getChannelData(0);
-                        const pcm16 = new Int16Array(float32.length);
-                        for (let i = 0; i < float32.length; i++) {
-                            pcm16[i] = Math.max(-32768, Math.min(32767, float32[i] * 32768));
-                        }
-                        const base64 = btoa(String.fromCharCode(...new Uint8Array(pcm16.buffer)));
-                        if (ws.readyState === WebSocket.OPEN) {
-                            ws.send(JSON.stringify({ type: 'audio', data: { audio: base64 } }));
-                            console.log('[DEBUG] sent audio chunk, pcm16 samples:', pcm16.length);
-                        }
-                    };
-                    micSource.connect(processor);
-                    processor.connect(audioCtx.destination);
-                    mediaRecorder = { stop: () => { processor.disconnect(); micSource.disconnect(); audioCtx.close(); stream.getTracks().forEach(t => t.stop()); } };
-
-                    isRecording = true;
-                    micBtn.textContent = '🔴 Stop Mic';
-                    addToTranscript('🎤 Listening...');
-                    console.log('[DEBUG] Mic started, streaming PCM16 at 16kHz');
-                } catch (err) {
-                    console.error('Microphone access denied:', err);
-                    addToTranscript('❌ Microphone access denied');
-                }
-            } else {
-                mediaRecorder.stop();
-                isRecording = false;
-                micBtn.textContent = '🎤 Start Mic';
-            }
-        }
-
-        function takeScreenshot() {
-            ws.send(JSON.stringify({
-                type: 'screenshot'
-            }));
-            addToTranscript('📸 Taking screenshot...');
-        }
-
-        async function startCamera() {
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-                const video = document.createElement('video');
-                video.srcObject = stream;
-                video.play();
-
-                video.onloadedmetadata = () => {
-                    const canvas = document.createElement('canvas');
-                    canvas.width = video.videoWidth;
-                    canvas.height = video.videoHeight;
-                    const ctx = canvas.getContext('2d');
-                    ctx.drawImage(video, 0, 0);
-                    
-                    canvas.toBlob((blob) => {
-                        const reader = new FileReader();
-                        reader.onload = () => {
-                            const base64 = reader.result.split(',')[1];
-                            ws.send(JSON.stringify({
-                                type: 'image',
-                                data: { image: base64 }
-                            }));
-                            addToTranscript('📹 Camera frame sent');
-                        };
-                        reader.readAsDataURL(blob);
-                    }, 'image/jpeg');
-                    
-                    stream.getTracks().forEach(track => track.stop());
-                };
-            } catch (err) {
-                console.error('Camera access denied:', err);
-                addToTranscript('❌ Camera access denied');
-            }
-        }
-
-        function playAudio(base64Audio) {
-            const binary = atob(base64Audio);
-            const pcm16 = new Int16Array(binary.length / 2);
-            for (let i = 0; i < pcm16.length; i++) {
-                pcm16[i] = binary.charCodeAt(i * 2) | (binary.charCodeAt(i * 2 + 1) << 8);
-            }
-            const sampleRate = 24000; // Gemini Live outputs at 24kHz
-            const audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate });
-            const audioBuffer = audioCtx.createBuffer(1, pcm16.length, sampleRate);
-            const channelData = audioBuffer.getChannelData(0);
-            for (let i = 0; i < pcm16.length; i++) {
-                channelData[i] = pcm16[i] / 32768.0;
-            }
-            const source = audioCtx.createBufferSource();
-            source.buffer = audioBuffer;
-            source.connect(audioCtx.destination);
-            source.start();
-        }
-
-        // Auto-connect on load
-        window.onload = () => connect();
-    </script>
-</body>
-</html>`
-
-	w.Header().Set("Content-Type", "text/html")
-	fmt.Fprint(w, html)
-}
+	AgentScriptToolJSON = `{
+		"name": "agentscript_dsl",
+		"description": "Execute AgentScript DSL pipeline. Syntax: command \"arg\" >=> command \"arg\". NO dots, NO parens, NO equals signs.",
+		"parameters": {
+			"type": "object",
+			"properties": {
+				"dsl": {
+					"type": "string",
+					"description": "AgentScript DSL. Example: weather \"NYC\" or ( weather \"NYC\" <*> crypto \"BTC\" ) >=> merge >=> ask \"Summarize\""
+				}
+			},
+			"required": ["dsl"]
+		}
+	}`
+)
