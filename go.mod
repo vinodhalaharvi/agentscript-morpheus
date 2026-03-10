@@ -4,8 +4,9 @@ go 1.26
 
 require (
 	github.com/alecthomas/participle/v2 v2.1.1
-	github.com/gorilla/websocket v1.5.3
+	github.com/gordonklaus/portaudio v0.0.0-20260203164431-765aa7dfa631
 	golang.org/x/oauth2 v0.23.0
+	golang.org/x/term v0.30.0
 	google.golang.org/api v0.197.0
 	google.golang.org/genai v1.49.0
 )
@@ -24,7 +25,7 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.4 // indirect
 	github.com/googleapis/gax-go/v2 v2.13.0 // indirect
-	github.com/gordonklaus/portaudio v0.0.0-20260203164431-765aa7dfa631 // indirect
+	github.com/gorilla/websocket v1.5.3 // indirect
 	go.opencensus.io v0.24.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.54.0 // indirect
 	go.opentelemetry.io/otel v1.29.0 // indirect

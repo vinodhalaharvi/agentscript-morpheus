@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -156,6 +157,20 @@ func (s SessionState) String() string {
 	return [...]string{"idle", "listening", "speaking", "executing_dsl"}[s]
 }
 
+// say prints with \r\n so lines render correctly in raw terminal mode.
+func writeln(format string, args ...any) {
+	var s string
+	if len(args) == 0 {
+		s = format
+	} else {
+		s = fmt.Sprintf(format, args...)
+	}
+	// Replace any bare \n with \r\n so raw terminal mode renders correctly
+	out := strings.ReplaceAll(s, "\r\n", "\n") // normalise first
+	out = strings.ReplaceAll(out, "\n", "\r\n")
+	fmt.Print(out + "\r\n")
+}
+
 // ============================================================================
 // Audio constants
 // ============================================================================
@@ -208,7 +223,7 @@ func newSession(ctx context.Context, cancel context.CancelFunc, runtime *agentsc
 
 func (s *Session) registerTransitions() {
 	print := func(msg string) func() {
-		return func() { fmt.Println(msg) }
+		return func() { writeln(msg) }
 	}
 	s.sm.Register(StateIdle, StateListening, print("🎤 Listening..."))
 	s.sm.Register(StateListening, StateSpeaking, print("🔊 Speaking..."))
@@ -256,7 +271,7 @@ func (s *Session) connect() error {
 	}
 
 	s.gem.OnText = func(text string) {
-		fmt.Printf("💬 %s\n", text)
+		writeln("💬 %s", text)
 	}
 
 	s.gem.OnToolCall = func(id, name string, args map[string]any) {
@@ -267,7 +282,7 @@ func (s *Session) connect() error {
 
 	// Barge-in: user spoke while Gemini was speaking — drain playback queue
 	s.gem.OnInterrupt = func() {
-		fmt.Println("⏸  Interrupted")
+		writeln("⏸  Interrupted")
 		s.drainAudio()
 		s.sm.Transition(StateListening)
 	}
@@ -422,6 +437,42 @@ func (s *Session) runMic() error {
 // DSL execution
 // ============================================================================
 
+// stripMarkdown removes markdown syntax so Gemini doesn't read symbols aloud.
+// Handles: headers, bold/italic, tables, bullet lists, code fences.
+func stripMarkdown(s string) string {
+	lines := strings.Split(s, "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		// skip table separators
+		if strings.HasPrefix(strings.TrimSpace(line), "|---") {
+			continue
+		}
+		// table rows: strip pipes and extra spaces
+		if strings.Contains(line, "|") {
+			line = strings.ReplaceAll(line, "|", " ")
+		}
+		// code fences
+		if strings.HasPrefix(strings.TrimSpace(line), "```") {
+			continue
+		}
+		// headers → plain text
+		line = strings.TrimLeft(line, "#")
+		// bold/italic
+		line = strings.ReplaceAll(line, "**", "")
+		line = strings.ReplaceAll(line, "__", "")
+		line = strings.ReplaceAll(line, "*", "")
+		line = strings.ReplaceAll(line, "_", " ")
+		// bullet points
+		line = strings.TrimPrefix(strings.TrimSpace(line), "- ")
+		line = strings.TrimPrefix(strings.TrimSpace(line), "* ")
+		line = strings.TrimSpace(line)
+		if line != "" {
+			out = append(out, line)
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
 func (s *Session) executeDSL(callID string, args map[string]any) {
 	dslArg, ok := args["dsl"]
 	if !ok {
@@ -434,14 +485,14 @@ func (s *Session) executeDSL(callID string, args map[string]any) {
 		return
 	}
 
-	fmt.Printf("⚡ DSL: %s\n", dsl)
+	writeln("⚡ DSL: %s", dsl)
 	s.sm.Transition(StateExecutingDSL)
 	s.sendToolResponse(callID, map[string]any{"status": "executing", "dsl": dsl})
 
 	program, err := agentscript.Parse(dsl)
 	if err != nil {
 		errMsg := fmt.Sprintf("DSL parse error: %v", err)
-		fmt.Printf("❌ %s\n", errMsg)
+		writeln("❌ %s", errMsg)
 		s.sm.Transition(StateListening)
 		s.gem.SendText("I couldn't parse the DSL pipeline: " + errMsg)
 		return
@@ -450,15 +501,17 @@ func (s *Session) executeDSL(callID string, args map[string]any) {
 	result, err := s.runtime.Execute(s.ctx, program)
 	if err != nil {
 		errMsg := fmt.Sprintf("DSL execution error: %v", err)
-		fmt.Printf("❌ %s\n", errMsg)
+		writeln("❌ %s", errMsg)
 		s.sm.Transition(StateListening)
 		s.gem.SendText("The DSL pipeline failed: " + errMsg)
 		return
 	}
 
-	fmt.Printf("✅ DSL done (%d bytes)\n", len(result))
+	writeln("✅ Done")
+	writeln("%s", result)
 	s.sm.Transition(StateSpeaking)
-	s.gem.SendText(fmt.Sprintf("DSL pipeline completed. Results:\n\n%s\n\nPlease summarize concisely for voice.", result))
+	clean := stripMarkdown(result)
+	s.gem.SendText(fmt.Sprintf("DSL result:\n\n%s\n\nSummarize this concisely in plain spoken English for voice. No markdown, no symbols.", clean))
 }
 
 func (s *Session) sendToolResponse(id string, result map[string]any) {
@@ -472,23 +525,23 @@ func (s *Session) sendToolResponse(id string, result map[string]any) {
 // ============================================================================
 
 func (s *Session) takeScreenshot() {
-	fmt.Println("📸 Taking screenshot...")
+	writeln("📸 Taking screenshot...")
 	cmd := exec.Command("screencapture", "-t", "jpg", "-x", "/tmp/morpheus_screenshot.jpg")
 	if err := cmd.Run(); err != nil {
-		fmt.Printf("❌ Screenshot failed: %v\n", err)
+		writeln("❌ Screenshot failed: %v", err)
 		return
 	}
 	data, err := os.ReadFile("/tmp/morpheus_screenshot.jpg")
 	if err != nil {
-		fmt.Printf("❌ Read screenshot failed: %v\n", err)
+		writeln("❌ Read screenshot failed: %v", err)
 		return
 	}
 	imageB64 := base64.StdEncoding.EncodeToString(data)
 	if err := s.gem.SendImage(imageB64); err != nil {
-		fmt.Printf("❌ Send screenshot failed: %v\n", err)
+		writeln("❌ Send screenshot failed: %v", err)
 		return
 	}
-	fmt.Println("📸 Screenshot sent")
+	writeln("📸 Screenshot sent")
 	s.gem.SendText("I just took a screenshot of my screen. What do you see and what actions can you help with?")
 	os.Remove("/tmp/morpheus_screenshot.jpg")
 }
@@ -542,13 +595,13 @@ func main() {
 
 	sess := newSession(ctx, cancel, runtime, logger)
 
-	fmt.Println("🚀 Morpheus — AgentScript Live")
-	fmt.Println("   Connecting to Gemini Live...")
+	writeln("🚀 Morpheus — AgentScript Live")
+	writeln("   Connecting to Gemini Live...")
 
 	if err := sess.connect(); err != nil {
 		log.Fatal("connect failed:", err)
 	}
-	fmt.Println("🟢 Connected. Controls: [SPACE] mute/unmute  [S] screenshot  [Ctrl+C] quit")
+	writeln("🟢 Connected. Controls: [SPACE] mute/unmute  [S] screenshot  [Ctrl+C] quit")
 
 	// Handle signals
 	sig := make(chan os.Signal, 1)
@@ -562,7 +615,7 @@ func main() {
 	// Raw terminal — single keypress without Enter
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {
-		fmt.Println("⚠️  Could not set raw terminal, using line mode (press Enter after key)")
+		writeln("⚠️  Could not set raw terminal, using line mode (press Enter after key)")
 	}
 	go func() {
 		buf := make([]byte, 1)
@@ -575,10 +628,10 @@ func main() {
 			case ' ':
 				if sess.muted.Load() {
 					sess.muted.Store(false)
-					fmt.Println("\r🎤 Unmuted")
+					writeln("🎤 Unmuted")
 				} else {
 					sess.muted.Store(true)
-					fmt.Println("\r🔇 Muted")
+					writeln("🔇 Muted")
 				}
 			case 's', 'S':
 				go sess.takeScreenshot()
@@ -591,11 +644,11 @@ func main() {
 
 	select {
 	case <-sig:
-		fmt.Println("\n👋 Shutting down...")
+		writeln("👋 Shutting down...")
 		cancel()
 	case err := <-errCh:
 		if err != nil {
-			fmt.Printf("❌ Audio error: %v\n", err)
+			writeln("❌ Audio error: %v", err)
 		}
 		cancel()
 	}
@@ -629,7 +682,7 @@ VALID COMMANDS - USE ONLY THESE EXACT NAMES:
   search "query"
   news "topic"
   stock "TICKER"
-  job_search "role" "location"
+  job_search "role" "location" "employment_type"
   places_search "query"
   maps_trip "title"
   reddit "subreddit"
@@ -650,7 +703,10 @@ CORRECT EXAMPLES:
   weather "New York"
   weather "London" >=> ask "Summarize in one sentence"
   ( weather "NYC" <*> crypto "BTC" ) >=> merge >=> ask "Summarize for voice"
-  job_search "golang developer" "remote"
+  job_search "golang developer" "remote" "fulltime"
+  job_search "golang developer" "remote" ""
+  job_search "software engineer" "San Francisco" "fulltime"
+  job_search "python data scientist" "" "parttime"
   search "India vs NZ cricket score" >=> ask "What is the current score?"
   news "AI" >=> summarize
 
