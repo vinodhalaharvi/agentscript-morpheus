@@ -91,6 +91,22 @@ func (sm *StateMachine[S]) Transition(to S) bool {
 
 func (sm *StateMachine[S]) Is(s S) bool { return sm.State() == s }
 
+// forceState sets state unconditionally — use when recovery is more important than correctness.
+func (sm *StateMachine[S]) forceState(s S, label string) {
+	sm.mu.Lock()
+	idx, ok := sm.stateIdx[s]
+	sm.mu.Unlock()
+	if ok {
+		sm.current.Store(idx)
+		if sm.logger != nil {
+			sm.logger.Debug("forced state", "state", fmt.Sprint(s))
+		}
+		if label != "" {
+			writeln(label)
+		}
+	}
+}
+
 // ============================================================================
 // Generic Handler + Filter + Bus
 // ============================================================================
@@ -225,18 +241,69 @@ func (s *Session) registerTransitions() {
 	print := func(msg string) func() {
 		return func() { writeln(msg) }
 	}
-	s.sm.Register(StateIdle, StateListening, print("🎤 Listening..."))
-	s.sm.Register(StateListening, StateSpeaking, print("🔊 Speaking..."))
-	s.sm.Register(StateListening, StateExecutingDSL, print("⚙️  Executing DSL..."))
-	s.sm.Register(StateSpeaking, StateListening, print("🎤 Listening..."))
-	s.sm.Register(StateSpeaking, StateExecutingDSL, print("⚙️  Executing DSL..."))
-	s.sm.Register(StateExecutingDSL, StateSpeaking, print("🔊 Speaking..."))
-	s.sm.Register(StateExecutingDSL, StateListening, print("🎤 Listening..."))
+	// Register every possible pair so nothing ever gets silently rejected
+	states := []SessionState{StateIdle, StateListening, StateSpeaking, StateExecutingDSL}
+	labels := map[SessionState]string{
+		StateListening:    "🎤 Listening...",
+		StateSpeaking:     "🔊 Speaking...",
+		StateExecutingDSL: "⚙️  Executing DSL...",
+	}
+	for _, from := range states {
+		for _, to := range states {
+			if from == to {
+				continue
+			}
+			label, ok := labels[to]
+			if !ok {
+				label = to.String()
+			}
+			s.sm.Register(from, to, print(label))
+		}
+	}
 }
 
 // ============================================================================
 // Gemini wiring
 // ============================================================================
+
+// buildSystemPrompt injects user-specific context (email, slack, name) from env vars.
+func buildSystemPrompt() string {
+	var ctx strings.Builder
+
+	hasEmail := os.Getenv("USER_EMAIL") != ""
+	hasSlack := os.Getenv("SLACK_CHANNEL") != "" || os.Getenv("SLACK_EMAIL") != ""
+
+	ctx.WriteString("\n\n== USER CONTEXT — USE THIS, NEVER ASK THE USER FOR THESE VALUES ==\n")
+
+	if v := os.Getenv("USER_NAME"); v != "" {
+		ctx.WriteString(fmt.Sprintf("User name: %s\n", v))
+	}
+	if v := os.Getenv("USER_EMAIL"); v != "" {
+		ctx.WriteString(fmt.Sprintf("User email: %s  ← use this whenever sending email TO the user\n", v))
+	}
+	if v := os.Getenv("SLACK_CHANNEL"); v != "" {
+		ctx.WriteString(fmt.Sprintf("Default Slack channel: %s\n", v))
+	}
+	if v := os.Getenv("SLACK_EMAIL"); v != "" {
+		ctx.WriteString(fmt.Sprintf("Slack email/handle: %s\n", v))
+	}
+	if v := os.Getenv("GITHUB_USER"); v != "" {
+		ctx.WriteString(fmt.Sprintf("GitHub username: %s\n", v))
+	}
+
+	ctx.WriteString("\nRULES FOR ACTIONS:\n")
+	if hasEmail {
+		ctx.WriteString("- When user says 'email me' or 'send me' → use email DSL with the USER_EMAIL above, no questions\n")
+		ctx.WriteString("- NEVER say 'I need your email address' — you already have it above\n")
+	}
+	if hasSlack {
+		ctx.WriteString("- When user says 'slack me' or 'notify me' → use notify DSL with the SLACK_CHANNEL above\n")
+	}
+	ctx.WriteString("- NEVER say 'I'm unable to send' or 'I can't send' — just execute the DSL and report what happened\n")
+	ctx.WriteString("- If a DSL command fails, tell the user the specific error, not a vague 'unable to'\n")
+
+	return MorpheusAgentSystemPrompt + ctx.String()
+}
 
 func (s *Session) connect() error {
 	var toolDef struct {
@@ -249,7 +316,7 @@ func (s *Session) connect() error {
 	}
 
 	gem, err := gl.NewLiveSession(s.ctx, gl.LiveConfig{
-		SystemPrompt: MorpheusAgentSystemPrompt,
+		SystemPrompt: buildSystemPrompt(),
 		VoiceName:    "Puck",
 		Tools: []*genai.Tool{{
 			FunctionDeclarations: []*genai.FunctionDeclaration{{
@@ -275,6 +342,7 @@ func (s *Session) connect() error {
 	}
 
 	s.gem.OnToolCall = func(id, name string, args map[string]any) {
+		writeln("🔧 tool_call: name=%s id=%s args=%v", name, id, args)
 		if name == "agentscript_dsl" {
 			go s.executeDSL(id, args)
 		}
@@ -284,14 +352,13 @@ func (s *Session) connect() error {
 	s.gem.OnInterrupt = func() {
 		writeln("⏸  Interrupted")
 		s.drainAudio()
-		s.sm.Transition(StateListening)
+		s.sm.forceState(StateListening, "🎤 Listening...")
 	}
 
 	s.gem.OnTurnDone = func() {
-		// wait for playback to finish, then go back to listening
 		go func() {
 			s.waitPlaybackDone()
-			s.sm.Transition(StateListening)
+			s.sm.forceState(StateListening, "🎤 Listening...")
 		}()
 	}
 
@@ -643,6 +710,17 @@ func main() {
 
 	writeln("🚀 Morpheus — AgentScript Live")
 	writeln("   Connecting to Gemini Live...")
+
+	// Warn about missing capabilities
+	if googleCreds == "" {
+		writeln("⚠️  GOOGLE_CREDENTIALS_FILE not set — email/calendar will be simulated only")
+	}
+	if searchKey == "" {
+		writeln("⚠️  SERPAPI_KEY not set — search/news/jobs/stock will not work")
+	}
+	if os.Getenv("USER_EMAIL") == "" {
+		writeln("⚠️  USER_EMAIL not set — Gemini will ask for email address")
+	}
 
 	if err := sess.connect(); err != nil {
 		log.Fatal("connect failed:", err)
