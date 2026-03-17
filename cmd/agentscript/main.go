@@ -42,7 +42,7 @@ func main() {
 	rt, err := agentscript.NewRuntime(ctx, agentscript.RuntimeConfig{
 		GeminiAPIKey:       geminiKey,
 		ClaudeAPIKey:       os.Getenv("CLAUDE_API_KEY"),
-		SearchAPIKey:       os.Getenv("SEARCH_API_KEY"),
+		SearchAPIKey:       coalesce(os.Getenv("SEARCH_API_KEY"), os.Getenv("SERPAPI_KEY")),
 		GoogleCredsFile:    googleCreds,
 		GoogleTokenFile:    os.Getenv("GOOGLE_TOKEN_FILE"),
 		GitHubClientID:     os.Getenv("GITHUB_CLIENT_ID"),
@@ -265,4 +265,14 @@ Fan-out (parallel):
 Sequential pipeline:
   search "topic" >=> summarize >=> save "out.md"
 `)
+}
+
+// coalesce returns the first non-empty string.
+func coalesce(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
