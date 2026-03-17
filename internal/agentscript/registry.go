@@ -1,0 +1,129 @@
+package agentscript
+
+// registry.go is the single place that knows about all plugins.
+// It imports every pkg/* plugin and wires them into the Registry.
+//
+// Adding a new package = one new import + one new Register() call here.
+// Nothing else changes — not runtime.go, not the switch, not the grammar.
+//
+// This file is the composition root for the plugin system.
+
+import (
+	"context"
+	"fmt"
+	"strings"
+
+	"github.com/vinodhalaharvi/agentscript/pkg/cache"
+	agcrypto "github.com/vinodhalaharvi/agentscript/pkg/crypto"
+	aggithub "github.com/vinodhalaharvi/agentscript/pkg/github"
+	"github.com/vinodhalaharvi/agentscript/pkg/huggingface"
+	"github.com/vinodhalaharvi/agentscript/pkg/jobsearch"
+	"github.com/vinodhalaharvi/agentscript/pkg/mcp"
+	"github.com/vinodhalaharvi/agentscript/pkg/news"
+	"github.com/vinodhalaharvi/agentscript/pkg/notify"
+	"github.com/vinodhalaharvi/agentscript/pkg/plugin"
+	"github.com/vinodhalaharvi/agentscript/pkg/reddit"
+	"github.com/vinodhalaharvi/agentscript/pkg/rss"
+	agstock "github.com/vinodhalaharvi/agentscript/pkg/stock"
+	"github.com/vinodhalaharvi/agentscript/pkg/twitter"
+	"github.com/vinodhalaharvi/agentscript/pkg/weather"
+	"github.com/vinodhalaharvi/agentscript/pkg/whatsapp"
+)
+
+// buildRegistry constructs the plugin registry from the runtime's clients.
+// Called once from NewRuntime — the result is stored on r.registry.
+func (r *Runtime) buildRegistry(c *cache.Cache) *plugin.Registry {
+	reg := plugin.NewRegistry()
+
+	// --- Data plugins ---
+	reg.Register(weather.NewPlugin(c, r.verbose))
+	reg.Register(agstock.NewPlugin(r.searchKey, c, r.verbose))
+	reg.Register(agcrypto.NewPlugin(c, r.verbose))
+	reg.Register(news.NewPlugin(r.searchKey, c, r.verbose))
+	reg.Register(reddit.NewPlugin(c, r.verbose))
+	reg.Register(rss.NewPlugin(c, r.verbose))
+	reg.Register(twitter.NewPlugin(r.verbose))
+	reg.Register(jobsearch.NewPlugin(r.searchKey, c, r.verbose))
+
+	// --- Notification plugins ---
+	reg.Register(notify.NewPlugin(r.verbose))
+	reg.Register(whatsapp.NewPlugin(r.verbose))
+
+	// --- HuggingFace ---
+	reg.Register(huggingface.NewPlugin(r.verbose))
+
+	// --- MCP — stateful, shares the same client as the runtime ---
+	reg.Register(mcp.NewPlugin(r.mcp))
+
+	// --- GitHub — ReactGenerator is the functional field seam.
+	// Claude is preferred; Gemini is the fallback; nil means no AI available.
+	// The github plugin doesn't know which it gets — just that it's a function.
+	var reactGen aggithub.ReactGenerator
+	if r.claude != nil {
+		reactGen = r.claude.GenerateReactSPA
+	} else if r.gemini != nil {
+		reactGen = r.buildGeminiReactGenerator()
+	}
+	reg.Register(aggithub.NewPlugin(r.github, reactGen))
+
+	return reg
+}
+
+// buildGeminiReactGenerator adapts the Gemini client into a ReactGenerator.
+// This is the XxxFunc bridge pattern — Gemini's GenerateContent doesn't
+// match ReactGenerator's signature, so we wrap it in a closure.
+func (r *Runtime) buildGeminiReactGenerator() aggithub.ReactGenerator {
+	return func(ctx context.Context, title, content string) (string, error) {
+		prompt := buildReactSPAPrompt(title, content)
+		result, err := r.gemini.GenerateContent(ctx, prompt)
+		if err != nil {
+			return "", err
+		}
+		return cleanHTMLResponse(result), nil
+	}
+}
+
+// buildReactSPAPrompt constructs the prompt for React SPA generation.
+// Extracted here so it can be used by both Gemini and any future generator.
+func buildReactSPAPrompt(title, content string) string {
+	return fmt.Sprintf(`Generate a beautiful, modern React single-page application (SPA) for the following content.
+
+TITLE: %s
+
+CONTENT:
+%s
+
+REQUIREMENTS:
+1. Output ONLY the complete HTML file with embedded React (using babel standalone)
+2. Use React hooks (useState, useEffect)
+3. Modern, dark theme UI with gradients and animations
+4. Responsive design with Tailwind CSS (via CDN)
+5. Include smooth scroll animations
+6. Add a navigation header if content has sections
+7. Use React icons or emojis for visual appeal
+8. Make it visually stunning - this is for a hackathon demo!
+9. Include a footer crediting "Built with AgentScript"
+
+OUTPUT FORMAT:
+Return ONLY the HTML code starting with <!DOCTYPE html> and ending with </html>
+No markdown, no explanation, just the raw HTML/React code.`, title, content)
+}
+
+// cleanHTMLResponse strips markdown code fences from an AI-generated HTML response.
+func cleanHTMLResponse(result string) string {
+	result = strings.TrimSpace(result)
+	result = strings.TrimPrefix(result, "```html")
+	result = strings.TrimPrefix(result, "```")
+	result = strings.TrimSuffix(result, "```")
+	result = strings.TrimSpace(result)
+
+	if !strings.HasPrefix(result, "<!DOCTYPE html>") && !strings.HasPrefix(result, "<html") {
+		if idx := strings.Index(result, "<!DOCTYPE html>"); idx != -1 {
+			return result[idx:]
+		}
+		if idx := strings.Index(result, "<html"); idx != -1 {
+			return result[idx:]
+		}
+	}
+	return result
+}

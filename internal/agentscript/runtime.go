@@ -26,6 +26,7 @@ import (
 	"github.com/vinodhalaharvi/agentscript/pkg/mcp"
 	"github.com/vinodhalaharvi/agentscript/pkg/news"
 	"github.com/vinodhalaharvi/agentscript/pkg/notify"
+	"github.com/vinodhalaharvi/agentscript/pkg/plugin"
 	"github.com/vinodhalaharvi/agentscript/pkg/reddit"
 	"github.com/vinodhalaharvi/agentscript/pkg/rss"
 	"github.com/vinodhalaharvi/agentscript/pkg/stock"
@@ -53,6 +54,9 @@ type Runtime struct {
 	verbose   bool
 	searchKey string
 	vars      map[string]string
+	// registry dispatches commands to plugins.
+	// Commands registered here take priority over the legacy switch.
+	registry *plugin.Registry
 }
 
 // RuntimeConfig holds runtime configuration
@@ -109,7 +113,8 @@ func NewRuntime(ctx context.Context, cfg RuntimeConfig) (*Runtime, error) {
 		}
 	}
 
-	return &Runtime{
+	c := cache.NewCache(cfg.Verbose)
+	r := &Runtime{
 		gemini:    geminiClient,
 		google:    googleClient,
 		github:    githubClient,
@@ -120,14 +125,16 @@ func NewRuntime(ctx context.Context, cfg RuntimeConfig) (*Runtime, error) {
 		reddit:    reddit.NewRedditClient(cfg.Verbose),
 		rss:       rss.NewRSSClient(cfg.Verbose),
 		notifier:  notify.NewNotifyClient(cfg.Verbose),
-		cache:     cache.NewCache(cfg.Verbose),
+		cache:     c,
 		twitter:   twitter.NewTwitterClient(cfg.Verbose),
 		whatsapp:  whatsapp.NewWhatsAppClient(cfg.Verbose),
 		emoji:     NewEmojiStyleClient(cfg.Verbose),
 		verbose:   cfg.Verbose,
 		searchKey: cfg.SearchAPIKey,
 		vars:      make(map[string]string),
-	}, nil
+	}
+	r.registry = r.buildRegistry(c)
+	return r, nil
 }
 
 // Execute runs a parsed program
@@ -219,6 +226,17 @@ func (r *Runtime) executeParallel(ctx context.Context, parallel *Parallel, input
 func (r *Runtime) executeCommand(ctx context.Context, cmd *Command, input string) (string, error) {
 	r.log("Executing: %s %q (input: %d bytes)", cmd.Action, cmd.Arg, len(input))
 
+	// Try plugin registry first.
+	// args follows the grammar: [Arg, Arg2, Arg3] — trimmed to non-empty.
+	args := []string{cmd.Arg, cmd.Arg2, cmd.Arg3}
+	if result, ok, err := r.registry.Execute(ctx, cmd.Action, args, input); ok {
+		if err != nil {
+			return "", fmt.Errorf("%s failed: %w", cmd.Action, err)
+		}
+		r.log("Result: %d bytes", len(result))
+		return result, nil
+	}
+
 	var result string
 	var err error
 
@@ -302,80 +320,16 @@ func (r *Runtime) executeCommand(ctx context.Context, cmd *Command, input string
 		result, err = r.translate(ctx, cmd.Arg, input)
 	case "places_search":
 		result, err = r.placesSearch(ctx, cmd.Arg, input)
-	case "mcp_connect":
-		result, err = r.mcpConnect(ctx, cmd.Arg, cmd.Arg2)
-	case "mcp_list":
-		result, err = r.mcpList(ctx, cmd.Arg, input)
-	case "mcp":
-		result, err = r.mcpCall(ctx, cmd.Arg, cmd.Arg2)
 	case "video_script":
 		result, err = r.videoScript(ctx, cmd.Arg, input)
 	case "confirm":
 		result, err = r.confirm(ctx, cmd.Arg, input)
-	case "github_pages":
-		result, err = r.githubPages(ctx, cmd.Arg, input)
-	case "github_pages_html":
-		result, err = r.githubPagesHTML(ctx, cmd.Arg, input)
-
-	// ==================== Data Commands ====================
-	case "job_search":
-		result, err = r.jobSearchCmd(ctx, cmd.Arg, cmd.Arg2, cmd.Arg3, input)
-	case "weather":
-		result, err = r.weatherFetch(ctx, cmd.Arg, input)
-	case "news":
-		result, err = r.newsFetch(ctx, cmd.Arg, input)
-	case "news_headlines":
-		result, err = r.newsHeadlines(ctx, cmd.Arg, input)
-	case "stock":
-		result, err = r.stockFetch(ctx, cmd.Arg, input)
-	case "crypto":
-		result, err = r.cryptoFetch(ctx, cmd.Arg, input)
-	case "reddit":
-		result, err = r.redditFetch(ctx, cmd.Arg, cmd.Arg2, input)
-	case "rss":
-		result, err = r.rssFetch(ctx, cmd.Arg, input)
-	case "twitter":
-		result, err = r.twitterFetch(ctx, cmd.Arg, input)
-
-	// ==================== Notifications ====================
-	case "notify":
-		result, err = r.notifyCmd(ctx, cmd.Arg, input)
-	case "whatsapp":
-		result, err = r.whatsappSend(ctx, cmd.Arg, input)
 
 	// ==================== Control Flow ====================
 	case "foreach":
 		result, err = r.foreachCmd(ctx, cmd.Arg, input)
 	case "if":
 		result, err = r.ifCmd(ctx, cmd.Arg, input)
-
-	// ==================== Hugging Face ====================
-	case "hf_generate":
-		result, err = r.hfGenerate(ctx, cmd.Arg, cmd.Arg2, input)
-	case "hf_summarize":
-		result, err = r.hfSummarize(ctx, cmd.Arg, input)
-	case "hf_classify":
-		result, err = r.hfClassify(ctx, cmd.Arg, cmd.Arg2, input)
-	case "hf_ner":
-		result, err = r.hfNER(ctx, cmd.Arg, cmd.Arg2, input)
-	case "hf_translate":
-		result, err = r.hfTranslateCmd(ctx, cmd.Arg, cmd.Arg2, cmd.Arg3, input)
-	case "hf_embeddings":
-		result, err = r.hfEmbeddings(ctx, cmd.Arg, cmd.Arg2, input)
-	case "hf_qa":
-		result, err = r.hfQA(ctx, cmd.Arg, cmd.Arg2, input)
-	case "hf_fill_mask":
-		result, err = r.hfFillMask(ctx, cmd.Arg, cmd.Arg2, input)
-	case "hf_zero_shot":
-		result, err = r.hfZeroShot(ctx, cmd.Arg, cmd.Arg2, input)
-	case "hf_image_generate":
-		result, err = r.hfImageGen(ctx, cmd.Arg, cmd.Arg2, input)
-	case "hf_image_classify":
-		result, err = r.hfImageClassify(ctx, cmd.Arg, input)
-	case "hf_speech_to_text":
-		result, err = r.hfSpeechToText(ctx, cmd.Arg, input)
-	case "hf_similarity":
-		result, err = r.hfSimilarityCmd(ctx, cmd.Arg, cmd.Arg2, input)
 
 	// ==================== Emoji Style ====================
 	case "emoji_style":
