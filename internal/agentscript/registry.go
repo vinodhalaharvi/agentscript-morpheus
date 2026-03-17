@@ -11,6 +11,7 @@ package agentscript
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/vinodhalaharvi/agentscript/pkg/cache"
@@ -21,6 +22,7 @@ import (
 	"github.com/vinodhalaharvi/agentscript/pkg/mcp"
 	"github.com/vinodhalaharvi/agentscript/pkg/news"
 	"github.com/vinodhalaharvi/agentscript/pkg/notify"
+	"github.com/vinodhalaharvi/agentscript/pkg/perplexity"
 	"github.com/vinodhalaharvi/agentscript/pkg/plugin"
 	"github.com/vinodhalaharvi/agentscript/pkg/reddit"
 	"github.com/vinodhalaharvi/agentscript/pkg/rss"
@@ -51,6 +53,12 @@ func (r *Runtime) buildRegistry(c *cache.Cache) *plugin.Registry {
 
 	// --- HuggingFace ---
 	reg.Register(huggingface.NewPlugin(r.verbose))
+
+	// --- Perplexity AI Search ---
+	// API key from PERPLEXITY_API_KEY. Falls back gracefully if not set.
+	if pplxKey := os.Getenv("PERPLEXITY_API_KEY"); pplxKey != "" {
+		reg.Register(perplexity.NewPlugin(pplxKey, "", r.verbose))
+	}
 
 	// --- MCP — stateful, shares the same client as the runtime ---
 	reg.Register(mcp.NewPlugin(r.mcp))
