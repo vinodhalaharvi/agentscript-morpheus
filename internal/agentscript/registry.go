@@ -14,6 +14,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/vinodhalaharvi/agentscript/pkg/agent"
 	"github.com/vinodhalaharvi/agentscript/pkg/cache"
 	agcrypto "github.com/vinodhalaharvi/agentscript/pkg/crypto"
 	aggithub "github.com/vinodhalaharvi/agentscript/pkg/github"
@@ -62,6 +63,12 @@ func (r *Runtime) buildRegistry(c *cache.Cache) *plugin.Registry {
 
 	// --- MCP — stateful, shares the same client as the runtime ---
 	reg.Register(mcp.NewPlugin(r.mcp))
+
+	// --- Agent — natural language to DSL via Claude
+	// r.RunDSL is the Executor seam — same pattern as ReactGenerator.
+	if r.claude != nil {
+		reg.Register(agent.NewPlugin(r.claude, r.RunDSL, r.verbose))
+	}
 
 	// --- GitHub — ReactGenerator is the functional field seam.
 	// Claude is preferred; Gemini is the fallback; nil means no AI available.

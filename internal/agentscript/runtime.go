@@ -137,6 +137,17 @@ func NewRuntime(ctx context.Context, cfg RuntimeConfig) (*Runtime, error) {
 	return r, nil
 }
 
+// RunDSL parses and executes a raw DSL string.
+// This is the Executor seam used by pkg/agent — lets the agent plugin
+// execute generated pipelines without importing internal/agentscript.
+func (r *Runtime) RunDSL(ctx context.Context, dsl string) (string, error) {
+	program, err := Parse(dsl)
+	if err != nil {
+		return "", fmt.Errorf("DSL parse error: %w", err)
+	}
+	return r.Execute(ctx, program)
+}
+
 // Execute runs a parsed program
 func (r *Runtime) Execute(ctx context.Context, program *Program) (string, error) {
 	var result string
