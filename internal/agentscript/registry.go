@@ -21,6 +21,7 @@ import (
 	"github.com/vinodhalaharvi/agentscript/pkg/huggingface"
 	"github.com/vinodhalaharvi/agentscript/pkg/jobsearch"
 	"github.com/vinodhalaharvi/agentscript/pkg/mcp"
+	"github.com/vinodhalaharvi/agentscript/pkg/mcpagent"
 	"github.com/vinodhalaharvi/agentscript/pkg/news"
 	"github.com/vinodhalaharvi/agentscript/pkg/notify"
 	"github.com/vinodhalaharvi/agentscript/pkg/openai"
@@ -65,6 +66,19 @@ func (r *Runtime) buildRegistry(c *cache.Cache) *plugin.Registry {
 
 	// --- MCP — stateful, shares the same client as the runtime ---
 	reg.Register(mcp.NewPlugin(r.mcp))
+
+	// --- MCP Agent — AI-driven tool selection over connected MCP servers
+	// Reasoner is Claude if available, Gemini as fallback.
+	// Same MCPClient as above — shares already-connected servers.
+	var mcpReasoner mcpagent.Reasoner
+	if r.claude != nil {
+		mcpReasoner = r.claude.Chat
+	} else if r.gemini != nil {
+		mcpReasoner = r.gemini.GenerateContent
+	}
+	if mcpReasoner != nil {
+		reg.Register(mcpagent.NewPlugin(r.mcp, mcpReasoner, r.verbose))
+	}
 
 	// --- Agent — natural language to DSL via Claude
 	// r.RunDSL is the Executor seam — same pattern as ReactGenerator.
