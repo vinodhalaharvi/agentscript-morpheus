@@ -23,9 +23,11 @@ import (
 	"github.com/vinodhalaharvi/agentscript/pkg/mcp"
 	"github.com/vinodhalaharvi/agentscript/pkg/news"
 	"github.com/vinodhalaharvi/agentscript/pkg/notify"
+	"github.com/vinodhalaharvi/agentscript/pkg/openai"
 	"github.com/vinodhalaharvi/agentscript/pkg/perplexity"
 	"github.com/vinodhalaharvi/agentscript/pkg/plugin"
 	"github.com/vinodhalaharvi/agentscript/pkg/reddit"
+	"github.com/vinodhalaharvi/agentscript/pkg/review"
 	"github.com/vinodhalaharvi/agentscript/pkg/rss"
 	agstock "github.com/vinodhalaharvi/agentscript/pkg/stock"
 	"github.com/vinodhalaharvi/agentscript/pkg/twitter"
@@ -68,6 +70,21 @@ func (r *Runtime) buildRegistry(c *cache.Cache) *plugin.Registry {
 	// r.RunDSL is the Executor seam — same pattern as ReactGenerator.
 	if r.claude != nil {
 		reg.Register(agent.NewPlugin(r.claude, r.RunDSL, r.verbose))
+	}
+
+	// --- Code Review Forum — Claude + Gemini + GPT-4 debate
+	// GeminiReviewer is the functional field seam for Gemini injection.
+	// Gracefully degrades — works with any subset of the three models.
+	var geminiReviewer review.GeminiReviewer
+	if r.gemini != nil {
+		geminiReviewer = r.gemini.GenerateContent
+	}
+	var openaiClient *openai.Client
+	if oaiKey := os.Getenv("OPENAI_API_KEY"); oaiKey != "" {
+		openaiClient = openai.NewClient(oaiKey, "")
+	}
+	if r.claude != nil || geminiReviewer != nil || openaiClient != nil {
+		reg.Register(review.NewPlugin(r.claude, geminiReviewer, openaiClient, r.verbose))
 	}
 
 	// --- GitHub — ReactGenerator is the functional field seam.
