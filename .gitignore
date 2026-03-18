@@ -1,4 +1,4 @@
 .env
 credentials.json
 token.json
-agentscript
+/agentscript
