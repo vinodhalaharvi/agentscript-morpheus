@@ -1505,16 +1505,36 @@ Return ONLY the JSON array, nothing else.`, input)
 		return "", fmt.Errorf("no places found in input")
 	}
 
-	// Build Google Maps directions URL
-	// Format: https://www.google.com/maps/dir/place1/place2/place3/...
-	var encodedPlaces []string
-	for _, p := range places {
-		// URL encode the address
-		encoded := strings.ReplaceAll(p.Address, " ", "+")
-		encodedPlaces = append(encodedPlaces, encoded)
+	// Build Google Maps search URL with all places as a query
+	// maps/dir breaks with 10+ cross-country stops — use search/dir based on count
+	var mapsURL string
+	if len(places) <= 4 {
+		// Short trips: directions URL works well
+		var encodedPlaces []string
+		for _, p := range places {
+			encoded := strings.ReplaceAll(p.Address, " ", "+")
+			encodedPlaces = append(encodedPlaces, encoded)
+		}
+		mapsURL = "https://www.google.com/maps/dir/" + strings.Join(encodedPlaces, "/")
+	} else {
+		// Many stops: use search URL centered on first location with all as query
+		// Format: https://www.google.com/maps/search/query/@lat,lng,zoom
+		var queries []string
+		for _, p := range places {
+			queries = append(queries, strings.ReplaceAll(p.Address, " ", "+"))
+		}
+		// Use waypoints format which works for multi-stop
+		encoded := strings.ReplaceAll(tripName, " ", "+")
+		_ = encoded
+		var waypoints []string
+		for _, p := range places {
+			waypoints = append(waypoints, url.QueryEscape(p.Address))
+		}
+		mapsURL = "https://www.google.com/maps/dir/?api=1&origin=" + url.QueryEscape(places[0].Address) +
+			"&destination=" + url.QueryEscape(places[len(places)-1].Address) +
+			"&waypoints=" + strings.Join(waypoints[1:len(waypoints)-1], "|")
+		_ = queries
 	}
-
-	mapsURL := "https://www.google.com/maps/dir/" + strings.Join(encodedPlaces, "/")
 
 	fmt.Printf("🗺️ Created trip with %d stops:\n", len(places))
 	for i, p := range places {

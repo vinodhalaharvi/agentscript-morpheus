@@ -1,0 +1,5 @@
+mcp_connect "db" "npx -y @pollinations/mcp-server-sqlite /Users/vinodhalaharvi/Downloads/customers.db"
+mcp_connect "maps" "npx -y @modelcontextprotocol/server-google-maps"
+>=> mcp_agent "db" "get all customer names, companies, addresses, cities and states from the customers table"
+>=> ask "Given these 10 customers across the US, suggest an optimal 3-day sales road trip grouping nearby cities"
+>=> maps_trip "Sales Road Trip"
