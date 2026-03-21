@@ -247,3 +247,106 @@ func EvaluateConditionString(condStr string, input string, vars map[string]strin
 
 	return cond.Evaluate(input, vars), nil
 }
+
+// ============================================================================
+// Pattern Matching — Haskell-style guards
+// ============================================================================
+//
+// Syntax:
+//   match
+//     | contains "rain"   >=> notify "slack"
+//     | temp > 90         >=> email "alert@company.com"
+//     | _                 >=> save "normal.md"
+//
+// Rules:
+//   - Each arm starts with |
+//   - Condition uses the same syntax as if (contains, >, <, ==, etc.)
+//   - _ is the wildcard/default arm — always matches
+//   - First matching arm wins — rest are skipped
+//   - The pipeline after >=> is the action for that arm
+//   - The piped input is passed through to the matching arm's action
+//
+// This is essentially a switch/case over the pipeline value using
+// the same Condition evaluator as `if`.
+
+// MatchArm is one | pattern >=> action branch.
+type MatchArm struct {
+	Pattern  string // the condition string, or "_" for wildcard
+	Pipeline string // raw DSL to execute if pattern matches
+}
+
+// ParseMatchBlock parses the body of a match statement.
+// Input looks like:
+//
+//	| contains "rain"   >=> notify "slack"
+//	| temp > 90         >=> email "alert@company.com"
+//	| _                 >=> save "normal.md"
+func ParseMatchBlock(body string) ([]MatchArm, error) {
+	var arms []MatchArm
+	lines := strings.Split(body, "\n")
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "//") {
+			continue
+		}
+		if !strings.HasPrefix(line, "|") {
+			continue
+		}
+
+		// Strip leading |
+		line = strings.TrimSpace(line[1:])
+
+		// Split on >=>
+		parts := strings.SplitN(line, ">=>", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("match arm missing >=>: %q", line)
+		}
+
+		pattern := strings.TrimSpace(parts[0])
+		pipeline := strings.TrimSpace(parts[1])
+
+		if pattern == "" {
+			return nil, fmt.Errorf("match arm has empty pattern")
+		}
+		if pipeline == "" {
+			return nil, fmt.Errorf("match arm has empty pipeline for pattern %q", pattern)
+		}
+
+		arms = append(arms, MatchArm{
+			Pattern:  pattern,
+			Pipeline: pipeline,
+		})
+	}
+
+	if len(arms) == 0 {
+		return nil, fmt.Errorf("match block has no arms")
+	}
+
+	return arms, nil
+}
+
+// EvalMatchArms evaluates arms in order, returns the pipeline of the first match.
+// Returns ("", false, nil) if no arm matches (no wildcard).
+func EvalMatchArms(arms []MatchArm, input string, vars map[string]string) (string, bool, error) {
+	if vars == nil {
+		vars = make(map[string]string)
+	}
+
+	for _, arm := range arms {
+		// Wildcard always matches
+		if arm.Pattern == "_" {
+			return arm.Pipeline, true, nil
+		}
+
+		matched, err := EvaluateConditionString(arm.Pattern, input, vars)
+		if err != nil {
+			return "", false, fmt.Errorf("match arm %q: %w", arm.Pattern, err)
+		}
+		if matched {
+			return arm.Pipeline, true, nil
+		}
+	}
+
+	return "", false, nil
+}

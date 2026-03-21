@@ -341,6 +341,8 @@ func (r *Runtime) executeCommand(ctx context.Context, cmd *Command, input string
 		result, err = r.foreachCmd(ctx, cmd.Arg, input)
 	case "if":
 		result, err = r.ifCmd(ctx, cmd.Arg, input)
+	case "match":
+		result, err = r.matchCmd(ctx, cmd.Arg, input)
 
 	// ==================== Emoji Style ====================
 	case "emoji_style":
@@ -2478,6 +2480,42 @@ func (r *Runtime) ifCmd(ctx context.Context, condition, input string) (string, e
 		return input, nil
 	}
 	return "", nil
+}
+
+// matchCmd implements Haskell-style pattern matching over the pipeline input.
+//
+// The match body (passed as cmd.Arg) contains arms separated by newlines:
+//
+//	| contains "rain"   >=> notify "slack"
+//	| temp > 90         >=> email "alert@company.com"
+//	| _                 >=> save "normal.md"
+//
+// First matching arm wins. _ is the wildcard/default.
+// The matched arm's pipeline is executed with the current input piped in.
+func (r *Runtime) matchCmd(ctx context.Context, body, input string) (string, error) {
+	if body == "" {
+		return "", fmt.Errorf("match requires a body — use multi-line match with | arms")
+	}
+
+	arms, err := ParseMatchBlock(body)
+	if err != nil {
+		return "", fmt.Errorf("match parse error: %w", err)
+	}
+
+	pipeline, matched, err := EvalMatchArms(arms, input, r.vars)
+	if err != nil {
+		return "", fmt.Errorf("match eval error: %w", err)
+	}
+
+	if !matched {
+		r.log("MATCH: no arm matched — passing through")
+		return input, nil
+	}
+
+	r.log("MATCH: arm matched, executing: %s", pipeline)
+
+	// Execute the matched arm's pipeline with current input
+	return r.RunDSL(ctx, pipeline)
 }
 
 // ============================================================================
