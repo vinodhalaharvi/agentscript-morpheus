@@ -22,6 +22,7 @@ import (
 	"github.com/vinodhalaharvi/agentscript/pkg/jobsearch"
 	"github.com/vinodhalaharvi/agentscript/pkg/mcp"
 	"github.com/vinodhalaharvi/agentscript/pkg/mcpagent"
+	"github.com/vinodhalaharvi/agentscript/pkg/mcpsearch"
 	"github.com/vinodhalaharvi/agentscript/pkg/news"
 	"github.com/vinodhalaharvi/agentscript/pkg/notify"
 	"github.com/vinodhalaharvi/agentscript/pkg/openai"
@@ -86,6 +87,10 @@ func (r *Runtime) buildRegistry(c *cache.Cache) *plugin.Registry {
 	if r.claude != nil {
 		reg.Register(agent.NewPlugin(r.claude, r.RunDSL, r.verbose))
 	}
+
+	// --- MCP Search — searches the official MCP registry
+	// No API key needed — the registry is public
+	reg.Register(mcpsearch.NewPlugin(r.verbose))
 
 	// --- Plug Agent — generates new plugins from English descriptions
 	// Generator is Claude.Chat — injected as functional field seam.
