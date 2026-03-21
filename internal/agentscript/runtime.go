@@ -1523,17 +1523,17 @@ Return ONLY the JSON array, nothing else.`, input)
 		for _, p := range places {
 			queries = append(queries, strings.ReplaceAll(p.Address, " ", "+"))
 		}
-		// Use waypoints format which works for multi-stop
-		encoded := strings.ReplaceAll(tripName, " ", "+")
-		_ = encoded
-		var waypoints []string
-		for _, p := range places {
-			waypoints = append(waypoints, url.QueryEscape(p.Address))
+		encodeAddr := func(addr string) string {
+			addr = strings.ReplaceAll(addr, ", ", " ")
+			addr = strings.ReplaceAll(addr, ",", " ")
+			addr = strings.ReplaceAll(addr, " ", "+")
+			return addr
 		}
-		mapsURL = "https://www.google.com/maps/dir/?api=1&origin=" + url.QueryEscape(places[0].Address) +
-			"&destination=" + url.QueryEscape(places[len(places)-1].Address) +
-			"&waypoints=" + strings.Join(waypoints[1:len(waypoints)-1], "|")
-		_ = queries
+		var parts []string
+		for _, p := range places {
+			parts = append(parts, encodeAddr(p.Address))
+		}
+		mapsURL = "https://www.google.com/maps/dir/" + strings.Join(parts, "/")
 	}
 
 	fmt.Printf("🗺️ Created trip with %d stops:\n", len(places))

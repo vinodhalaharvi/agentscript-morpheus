@@ -26,6 +26,7 @@ import (
 	"github.com/vinodhalaharvi/agentscript/pkg/notify"
 	"github.com/vinodhalaharvi/agentscript/pkg/openai"
 	"github.com/vinodhalaharvi/agentscript/pkg/perplexity"
+	"github.com/vinodhalaharvi/agentscript/pkg/plugagent"
 	"github.com/vinodhalaharvi/agentscript/pkg/plugin"
 	"github.com/vinodhalaharvi/agentscript/pkg/reddit"
 	"github.com/vinodhalaharvi/agentscript/pkg/review"
@@ -84,6 +85,14 @@ func (r *Runtime) buildRegistry(c *cache.Cache) *plugin.Registry {
 	// r.RunDSL is the Executor seam — same pattern as ReactGenerator.
 	if r.claude != nil {
 		reg.Register(agent.NewPlugin(r.claude, r.RunDSL, r.verbose))
+	}
+
+	// --- Plug Agent — generates new plugins from English descriptions
+	// Generator is Claude.Chat — injected as functional field seam.
+	// repoRoot is detected from the binary's working directory.
+	if r.claude != nil {
+		repoRoot, _ := os.Getwd()
+		reg.Register(plugagent.NewPlugin(r.claude.Chat, repoRoot, r.verbose))
 	}
 
 	// --- Code Review Forum — Claude + Gemini + GPT-4 debate
