@@ -201,7 +201,6 @@ func (s *MCPServer) sendRequest(req jsonRPCRequest) (*jsonRPCResponse, error) {
 	}
 
 	// Debug: show what we're sending
-	fmt.Fprintf(os.Stderr, "[MCP DEBUG] Sending: %s\n", string(data))
 
 	// Send request
 	if _, err := s.stdin.Write(append(data, '\n')); err != nil {
@@ -215,7 +214,6 @@ func (s *MCPServer) sendRequest(req jsonRPCRequest) (*jsonRPCResponse, error) {
 	}
 
 	// Debug: show what we received
-	fmt.Fprintf(os.Stderr, "[MCP DEBUG] Received: %s\n", line)
 
 	var resp jsonRPCResponse
 	if err := json.Unmarshal([]byte(line), &resp); err != nil {
@@ -240,7 +238,6 @@ func (m *MCPClient) CallTool(ctx context.Context, serverName, toolName, argsJSON
 	}
 
 	// Debug: show raw argsJSON
-	fmt.Fprintf(os.Stderr, "[MCP DEBUG] argsJSON raw: %q\n", argsJSON)
 
 	// Parse arguments - must be valid JSON object
 	var args map[string]interface{}
@@ -249,7 +246,6 @@ func (m *MCPClient) CallTool(ctx context.Context, serverName, toolName, argsJSON
 		argsJSON = strings.TrimSpace(argsJSON)
 
 		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			fmt.Fprintf(os.Stderr, "[MCP DEBUG] JSON parse error: %v\n", err)
 			return "", fmt.Errorf("invalid JSON arguments: %w", err)
 		}
 	}
