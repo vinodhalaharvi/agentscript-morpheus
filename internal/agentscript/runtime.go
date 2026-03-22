@@ -2677,8 +2677,15 @@ func (r *Runtime) matchCmd(ctx context.Context, body, input string) (string, err
 
 	r.log("MATCH: arm matched, executing: %s", pipeline)
 
-	// Execute the matched arm's pipeline with current input
-	return r.RunDSL(ctx, pipeline)
+	// Execute the matched arm's pipeline with current input piped in
+	program, err := Parse(preprocessDSL(pipeline))
+	if err != nil {
+		return "", fmt.Errorf("match arm parse error: %w", err)
+	}
+	if len(program.Statements) == 0 {
+		return input, nil
+	}
+	return r.executeStatement(ctx, program.Statements[0], input)
 }
 
 // ============================================================================

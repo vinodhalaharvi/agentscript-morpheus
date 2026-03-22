@@ -406,24 +406,25 @@ func (c *Client) buildDockerImage(ctx context.Context, imageTag, scriptPath stri
 		return fmt.Errorf("failed to write script: %w", err)
 	}
 
-	// Find the agentscript binary
-	binary, err := os.Executable()
-	if err != nil {
-		binary = "./agentscript"
-	}
-
-	// Copy binary
+	// Cross-compile agentscript binary for linux/amd64
+	// The running binary is likely ARM (Mac) but Cloud Run needs linux/amd64
 	binDest := filepath.Join(tmpDir, "agentscript")
-	binData, err := os.ReadFile(binary)
+	// Find repo root — go up from executable location
+	repoRoot, err := os.Getwd()
 	if err != nil {
-		return fmt.Errorf("failed to read binary %s: %w", binary, err)
+		repoRoot = "."
 	}
-	if err := os.WriteFile(binDest, binData, 0755); err != nil {
-		return fmt.Errorf("failed to write binary: %w", err)
+	buildCmd := exec.CommandContext(ctx, "go", "build", "-o", binDest, "./cmd/agentscript/")
+	buildCmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH=amd64", "CGO_ENABLED=0")
+	buildCmd.Dir = repoRoot
+	buildCmd.Stdout = os.Stderr
+	buildCmd.Stderr = os.Stderr
+	if err := buildCmd.Run(); err != nil {
+		return fmt.Errorf("failed to cross-compile binary for linux/amd64: %w", err)
 	}
 
 	// Write Dockerfile
-	dockerfile := `FROM debian:bookworm-slim
+	dockerfile := `FROM --platform=linux/amd64 debian:bookworm-slim
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY agentscript .
@@ -434,7 +435,7 @@ ENTRYPOINT ["./agentscript", "-f", "script.as"]
 		return fmt.Errorf("failed to write Dockerfile: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, "docker", "build", "-t", imageTag, tmpDir)
+	cmd := exec.CommandContext(ctx, "docker", "build", "--platform", "linux/amd64", "-t", imageTag, tmpDir)
 	cmd.Stdout = os.Stderr // progress to stderr
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
