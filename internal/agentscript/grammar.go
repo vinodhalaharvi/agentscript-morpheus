@@ -1,6 +1,8 @@
 package agentscript
 
 import (
+	"os"
+
 	"github.com/alecthomas/participle/v2"
 	"github.com/alecthomas/participle/v2/lexer"
 )
@@ -74,7 +76,17 @@ var Parser = participle.MustBuild[Program](
 	participle.Unquote("String"),
 )
 
-// Parse parses a Morpheus AgentScript program from a string
+// Parse parses a Morpheus AgentScript program from a string.
+// Always preprocesses to handle multiline match blocks.
 func Parse(input string) (*Program, error) {
 	return Parser.ParseString("", input)
+}
+
+// ParseFile parses DSL from a file path with preprocessing applied.
+func ParseFile(path string) (*Program, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return Parser.ParseString("", string(data))
 }

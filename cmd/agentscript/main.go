@@ -89,15 +89,14 @@ func main() {
 }
 
 func executeScript(ctx context.Context, rt *agentscript.Runtime, script string) {
-	program, err := agentscript.Parse(script)
+	result, err := rt.RunDSL(ctx, script)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Parse error: %v\n", err)
-		os.Exit(1)
-	}
-
-	result, err := rt.Execute(ctx, program)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Execution error: %v\n", err)
+		// Check if it is a parse error vs execution error
+		if strings.Contains(err.Error(), "DSL parse error") {
+			fmt.Fprintf(os.Stderr, "Parse error: %v\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "Execution error: %v\n", err)
+		}
 		os.Exit(1)
 	}
 

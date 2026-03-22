@@ -283,6 +283,7 @@ type MatchArm struct {
 //	| _                 >=> save "normal.md"
 func ParseMatchBlock(body string) ([]MatchArm, error) {
 	var arms []MatchArm
+	body = strings.ReplaceAll(body, "|||", "\n")
 	lines := strings.Split(body, "\n")
 
 	for _, line := range lines {
@@ -303,8 +304,10 @@ func ParseMatchBlock(body string) ([]MatchArm, error) {
 			return nil, fmt.Errorf("match arm missing >=>: %q", line)
 		}
 
-		pattern := strings.TrimSpace(parts[0])
-		pipeline := strings.TrimSpace(parts[1])
+		// Unescape quotes that were escaped by the preprocessor
+		pattern := strings.ReplaceAll(strings.TrimSpace(parts[0]), `\"`, `"`)
+		// Unescape quotes that were escaped by the preprocessor
+		pipeline := strings.ReplaceAll(strings.TrimSpace(parts[1]), `\"`, `"`)
 
 		if pattern == "" {
 			return nil, fmt.Errorf("match arm has empty pattern")

@@ -141,11 +141,63 @@ func NewRuntime(ctx context.Context, cfg RuntimeConfig) (*Runtime, error) {
 // This is the Executor seam used by pkg/agent — lets the agent plugin
 // execute generated pipelines without importing internal/agentscript.
 func (r *Runtime) RunDSL(ctx context.Context, dsl string) (string, error) {
-	program, err := Parse(dsl)
+	program, err := Parse(preprocessDSL(dsl))
 	if err != nil {
 		return "", fmt.Errorf("DSL parse error: %w", err)
 	}
 	return r.Execute(ctx, program)
+}
+
+// preprocessDSL rewrites multiline match blocks into single quoted string args
+// before the participle parser sees them.
+//
+// Input:
+//
+//	>=> match
+//	  | contains "rain" >=> notify "slack"
+//	  | _ >=> save "ok.md"
+//
+// Output:
+//
+//	>=> match "| contains \"rain\" >=> notify \"slack\"\n| _ >=> save \"ok.md\""
+func preprocessDSL(dsl string) string {
+	lines := strings.Split(dsl, "\n")
+	var out []string
+	i := 0
+	for i < len(lines) {
+		trimmed := strings.TrimSpace(lines[i])
+		isMatch := trimmed == "match" ||
+			strings.HasSuffix(trimmed, ">=> match") ||
+			trimmed == ">=> match"
+
+		if isMatch {
+			var arms []string
+			j := i + 1
+			for j < len(lines) {
+				arm := strings.TrimSpace(lines[j])
+				if strings.HasPrefix(arm, "|") {
+					arm = strings.ReplaceAll(arm, `"`, `\"`)
+					arms = append(arms, arm)
+					j++
+				} else {
+					break
+				}
+			}
+			if len(arms) > 0 {
+				body := strings.Join(arms, "|||")
+				rewritten := strings.TrimRight(lines[i], " \t")
+				if strings.HasSuffix(rewritten, "match") {
+					rewritten = rewritten + ` "` + body + `"`
+				}
+				out = append(out, rewritten)
+				i = j
+				continue
+			}
+		}
+		out = append(out, lines[i])
+		i++
+	}
+	return strings.Join(out, "\n")
 }
 
 // Execute runs a parsed program
