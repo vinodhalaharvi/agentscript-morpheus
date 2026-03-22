@@ -403,6 +403,12 @@ func (r *Runtime) executeCommand(ctx context.Context, cmd *Command, input string
 			prompt = cmd.Arg + "\n\nContext:\n" + input
 		}
 		result, err = r.geminiCall(ctx, prompt)
+	case "claude":
+		prompt := cmd.Arg
+		if input != "" {
+			prompt = cmd.Arg + "\n\nContext:\n" + input
+		}
+		result, err = r.claudeCall(ctx, prompt)
 	case "analyze":
 		prompt := "Analyze the following"
 		if cmd.Arg != "" {
@@ -529,6 +535,13 @@ func (r *Runtime) geminiCall(ctx context.Context, prompt string) (string, error)
 		return "", fmt.Errorf("GEMINI_API_KEY not set - required for this command")
 	}
 	return r.gemini.GenerateContent(ctx, prompt)
+}
+
+func (r *Runtime) claudeCall(ctx context.Context, prompt string) (string, error) {
+	if r.claude == nil {
+		return "", fmt.Errorf("CLAUDE_API_KEY not set - required for claude command")
+	}
+	return r.claude.Chat(ctx, prompt)
 }
 
 // search performs a web search
