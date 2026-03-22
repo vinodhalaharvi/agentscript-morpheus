@@ -233,6 +233,95 @@ func (r *Runtime) executeParallel(ctx context.Context, parallel *Parallel, input
 	return strings.Join(combined, "\n\n"), nil
 }
 
+// executeFmap implements fmap and pfmap.
+//
+// fmap  "command" "a,b,c"  — sequential map: applies command to each item
+// pfmap "command" "a,b,c"  — parallel map:   same but concurrent
+//
+// Items come from:
+//  1. cmd.Arg2 (comma-separated list in DSL arg)
+//  2. cmd.Arg  (if no Arg2 — single arg is the list)
+//  3. piped input (newline-separated if no list arg)
+//
+// Output: items joined by "\n~~~\n" so <> can split and re-join with custom separator.
+func (r *Runtime) executeFmap(ctx context.Context, cmdName, listArg, input string, parallel bool) (string, error) {
+	if cmdName == "" {
+		return "", fmt.Errorf("fmap/pfmap requires a command name as first argument")
+	}
+
+	// Resolve item list
+	var items []string
+	if listArg != "" {
+		// items from second arg: "a,b,c"
+		for _, item := range strings.Split(listArg, ",") {
+			item = strings.TrimSpace(item)
+			if item != "" {
+				items = append(items, item)
+			}
+		}
+	} else if input != "" {
+		// items from piped input — one per line
+		for _, line := range strings.Split(input, "\n") {
+			line = strings.TrimSpace(line)
+			if line != "" {
+				items = append(items, line)
+			}
+		}
+	} else {
+		return "", fmt.Errorf("fmap/pfmap: no items to map over (provide list arg or pipe input)")
+	}
+
+	if len(items) == 0 {
+		return "", fmt.Errorf("fmap/pfmap: empty item list")
+	}
+
+	r.log("fmap/%v: applying %q to %d items (parallel=%v)", cmdName, cmdName, len(items), parallel)
+
+	// applyOne runs the command on a single item
+	applyOne := func(item string) (string, error) {
+		syntheticCmd := &Command{
+			Action: cmdName,
+			Arg:    item,
+		}
+		return r.executeCommand(ctx, syntheticCmd, "")
+	}
+
+	results := make([]string, len(items))
+
+	if parallel {
+		type indexed struct {
+			i   int
+			out string
+			err error
+		}
+		ch := make(chan indexed, len(items))
+		for i, item := range items {
+			go func(idx int, it string) {
+				out, err := applyOne(it)
+				ch <- indexed{idx, out, err}
+			}(i, item)
+		}
+		for range items {
+			res := <-ch
+			if res.err != nil {
+				return "", fmt.Errorf("pfmap %q on item %d failed: %w", cmdName, res.i, res.err)
+			}
+			results[res.i] = res.out
+		}
+	} else {
+		for i, item := range items {
+			out, err := applyOne(item)
+			if err != nil {
+				return "", fmt.Errorf("fmap %q on %q failed: %w", cmdName, item, err)
+			}
+			results[i] = out
+		}
+	}
+
+	// Join with internal separator — <> splits on this
+	return strings.Join(results, "\n~~~\n"), nil
+}
+
 // executeCommand executes a single command
 func (r *Runtime) executeCommand(ctx context.Context, cmd *Command, input string) (string, error) {
 	r.log("Executing: %s %q (input: %d bytes)", cmd.Action, cmd.Arg, len(input))
@@ -281,6 +370,28 @@ func (r *Runtime) executeCommand(ctx context.Context, cmd *Command, input string
 		// merge just passes through the input - it's used after parallel
 		// to signal that we want to combine results (which parallel already does)
 		result = input
+
+	case "fmap":
+		// fmap "command" "item1,item2,item3"
+		// or: piped input lines → each line fed to command sequentially
+		// Sequential functor map — applies command to each item one by one.
+		result, err = r.executeFmap(ctx, cmd.Arg, cmd.Arg2, input, false)
+
+	case "pfmap":
+		// pfmap "command" "item1,item2,item3"
+		// Parallel functor map — same as fmap but concurrent (like <*> but dynamic).
+		result, err = r.executeFmap(ctx, cmd.Arg, cmd.Arg2, input, true)
+
+	case "<>":
+		// <> — Semigroup fold: concatenates all newline-separated results into one.
+		// Identity element is empty string. Associative: (a <> b) <> c = a <> (b <> c).
+		// Optional arg: separator string (default: "\n---\n")
+		sep := cmd.Arg
+		if sep == "" {
+			sep = "\n---\n"
+		}
+		parts := strings.Split(input, "\n~~~\n") // fmap uses ~~~ as internal separator
+		result = strings.Join(parts, sep)
 	case "email":
 		result, err = r.email(ctx, cmd.Arg, input)
 	case "calendar":

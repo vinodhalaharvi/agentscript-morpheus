@@ -16,6 +16,7 @@ import (
 
 	"github.com/vinodhalaharvi/agentscript/pkg/agent"
 	"github.com/vinodhalaharvi/agentscript/pkg/cache"
+	"github.com/vinodhalaharvi/agentscript/pkg/cloudrun"
 	agcrypto "github.com/vinodhalaharvi/agentscript/pkg/crypto"
 	aggithub "github.com/vinodhalaharvi/agentscript/pkg/github"
 	"github.com/vinodhalaharvi/agentscript/pkg/huggingface"
@@ -23,6 +24,7 @@ import (
 	"github.com/vinodhalaharvi/agentscript/pkg/mcp"
 	"github.com/vinodhalaharvi/agentscript/pkg/mcpagent"
 	"github.com/vinodhalaharvi/agentscript/pkg/mcpsearch"
+	"github.com/vinodhalaharvi/agentscript/pkg/network"
 	"github.com/vinodhalaharvi/agentscript/pkg/news"
 	"github.com/vinodhalaharvi/agentscript/pkg/notify"
 	"github.com/vinodhalaharvi/agentscript/pkg/openai"
@@ -87,6 +89,12 @@ func (r *Runtime) buildRegistry(c *cache.Cache) *plugin.Registry {
 	if r.claude != nil {
 		reg.Register(agent.NewPlugin(r.claude, r.RunDSL, r.verbose))
 	}
+
+	// --- Network diagnostics — pure Go, no external deps ---
+	reg.Register(network.NewPlugin(r.verbose))
+
+	// --- Cloud Run — deploy + schedule DSL scripts as Cloud Run Jobs ---
+	reg.Register(cloudrun.NewPlugin(r.verbose))
 
 	// --- MCP Search — searches the official MCP registry
 	// No API key needed — the registry is public
