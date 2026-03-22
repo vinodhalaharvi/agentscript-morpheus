@@ -474,20 +474,19 @@ func (c *Client) createCloudRunJob(ctx context.Context, jobName, imageTag, scrip
 		},
 		"spec": map[string]interface{}{
 			"template": map[string]interface{}{
+				"metadata": map[string]interface{}{},
 				"spec": map[string]interface{}{
-					"template": map[string]interface{}{
-						"spec": map[string]interface{}{
-							"serviceAccountName": c.serviceAccount,
-							"containers": []map[string]interface{}{
-								{
-									"image": imageTag,
-									"env":   envVars,
-									"resources": map[string]interface{}{
-										"limits": map[string]string{
-											"cpu":    "1",
-											"memory": "512Mi",
-										},
-									},
+					"taskCount":          1,
+					"maxRetries":         0,
+					"serviceAccountName": c.serviceAccount,
+					"containers": []map[string]interface{}{
+						{
+							"image": imageTag,
+							"env":   envVars,
+							"resources": map[string]interface{}{
+								"limits": map[string]string{
+									"cpu":    "1000m",
+									"memory": "512Mi",
 								},
 							},
 						},
@@ -537,16 +536,15 @@ func (c *Client) updateCloudRunJob(ctx context.Context, jobName, imageTag string
 		},
 		"spec": map[string]interface{}{
 			"template": map[string]interface{}{
+				"metadata": map[string]interface{}{},
 				"spec": map[string]interface{}{
-					"template": map[string]interface{}{
-						"spec": map[string]interface{}{
-							"serviceAccountName": c.serviceAccount,
-							"containers": []map[string]interface{}{
-								{
-									"image": imageTag,
-									"env":   envVars,
-								},
-							},
+					"taskCount":          1,
+					"maxRetries":         0,
+					"serviceAccountName": c.serviceAccount,
+					"containers": []map[string]interface{}{
+						{
+							"image": imageTag,
+							"env":   envVars,
 						},
 					},
 				},
