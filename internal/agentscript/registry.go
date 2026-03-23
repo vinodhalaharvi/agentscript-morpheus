@@ -18,6 +18,7 @@ import (
 	"github.com/vinodhalaharvi/agentscript/pkg/cache"
 	"github.com/vinodhalaharvi/agentscript/pkg/cloudrun"
 	agcrypto "github.com/vinodhalaharvi/agentscript/pkg/crypto"
+	"github.com/vinodhalaharvi/agentscript/pkg/datatable"
 	aggithub "github.com/vinodhalaharvi/agentscript/pkg/github"
 	"github.com/vinodhalaharvi/agentscript/pkg/huggingface"
 	"github.com/vinodhalaharvi/agentscript/pkg/jobsearch"
@@ -95,6 +96,9 @@ func (r *Runtime) buildRegistry(c *cache.Cache) *plugin.Registry {
 
 	// --- Cloud Run — deploy + schedule DSL scripts as Cloud Run Jobs ---
 	reg.Register(cloudrun.NewPlugin(r.verbose))
+
+	// --- DataTable — render .table DSL into self-contained HTML ---
+	reg.Register(datatable.NewPlugin(r.verbose))
 
 	// --- MCP Search — searches the official MCP registry
 	// No API key needed — the registry is public
