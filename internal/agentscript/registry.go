@@ -29,6 +29,7 @@ import (
 	"github.com/vinodhalaharvi/agentscript/pkg/news"
 	"github.com/vinodhalaharvi/agentscript/pkg/notify"
 	"github.com/vinodhalaharvi/agentscript/pkg/openai"
+	"github.com/vinodhalaharvi/agentscript/pkg/pdffill"
 	"github.com/vinodhalaharvi/agentscript/pkg/perplexity"
 	"github.com/vinodhalaharvi/agentscript/pkg/plugagent"
 	"github.com/vinodhalaharvi/agentscript/pkg/plugin"
@@ -93,6 +94,16 @@ func (r *Runtime) buildRegistry(c *cache.Cache) *plugin.Registry {
 
 	// --- Network diagnostics — pure Go, no external deps ---
 	reg.Register(network.NewPlugin(r.verbose))
+
+	// --- PDF Form Fill — AI-powered PDF form filling ---
+	// Reasoner is Gemini if available, Claude as fallback.
+	var pdfReasoner pdffill.Reasoner
+	if r.gemini != nil {
+		pdfReasoner = r.gemini.GenerateContent
+	} else if r.claude != nil {
+		pdfReasoner = r.claude.Chat
+	}
+	reg.Register(pdffill.NewPlugin(pdfReasoner, r.verbose))
 
 	// --- Cloud Run — deploy + schedule DSL scripts as Cloud Run Jobs ---
 	reg.Register(cloudrun.NewPlugin(r.verbose))
