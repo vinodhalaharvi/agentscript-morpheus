@@ -96,12 +96,12 @@ func (r *Runtime) buildRegistry(c *cache.Cache) *plugin.Registry {
 	reg.Register(network.NewPlugin(r.verbose))
 
 	// --- PDF Form Fill — AI-powered PDF form filling ---
-	// Reasoner is Gemini if available, Claude as fallback.
+	// Reasoner is Claude if available, Gemini as fallback.
 	var pdfReasoner pdffill.Reasoner
-	if r.gemini != nil {
-		pdfReasoner = r.gemini.GenerateContent
-	} else if r.claude != nil {
+	if r.claude != nil {
 		pdfReasoner = r.claude.Chat
+	} else if r.gemini != nil {
+		pdfReasoner = r.gemini.GenerateContent
 	}
 	reg.Register(pdffill.NewPlugin(pdfReasoner, r.verbose))
 
