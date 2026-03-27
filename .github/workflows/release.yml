@@ -1,0 +1,163 @@
+name: Build & Release AgentScript
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g. v1.0.0)'
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  BINARY_NAME: agentscript
+  GO_VERSION: '1.23'
+  SITE_REPO: vinodhalaharvi/agentscript-site
+
+jobs:
+  build:
+    name: Build ${{ matrix.os }}/${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - os: darwin
+            arch: arm64
+            label: macOS Apple Silicon
+          - os: darwin
+            arch: amd64
+            label: macOS Intel
+          - os: linux
+            arch: amd64
+            label: Linux x86_64
+          - os: linux
+            arch: arm64
+            label: Linux ARM64
+          - os: windows
+            arch: amd64
+            label: Windows x86_64
+            ext: .exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: 0
+        run: |
+          OUTPUT="${BINARY_NAME}-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}"
+          go build \
+            -ldflags="-s -w -X main.version=${{ steps.version.outputs.version }}" \
+            -o "dist/${OUTPUT}" \
+            ./cmd/agentscript/
+          echo "Built ${OUTPUT} ($(du -h dist/${OUTPUT} | cut -f1))"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BINARY_NAME }}-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/
+
+  release:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          merge-multiple: true
+
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum agentscript-* > checksums.txt
+          cat checksums.txt
+
+      - name: Create Release on public site repo
+        uses: softprops/action-gh-release@v2
+        with:
+          repository: ${{ env.SITE_REPO }}
+          token: ${{ secrets.SITE_REPO_TOKEN }}
+          tag_name: ${{ steps.version.outputs.version }}
+          name: AgentScript ${{ steps.version.outputs.version }}
+          body: |
+            ## AgentScript ${{ steps.version.outputs.version }}
+
+            ### Downloads
+
+            | Platform | Architecture | Binary |
+            |----------|-------------|--------|
+            | macOS | Apple Silicon (arm64) | `agentscript-darwin-arm64` |
+            | macOS | Intel (amd64) | `agentscript-darwin-amd64` |
+            | Linux | x86_64 (amd64) | `agentscript-linux-amd64` |
+            | Linux | ARM64 | `agentscript-linux-arm64` |
+            | Windows | x86_64 (amd64) | `agentscript-windows-amd64.exe` |
+
+            ### Quick Start
+
+            ```bash
+            chmod +x agentscript-*
+            mv agentscript-* /usr/local/bin/agentscript
+            export GEMINI_API_KEY="your-key"
+            agentscript -e 'search "AI trends" >=> summarize'
+            ```
+          draft: false
+          prerelease: false
+          files: |
+            dist/agentscript-*
+            dist/checksums.txt
+
+      - name: Checkout site repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SITE_REPO }}
+          token: ${{ secrets.SITE_REPO_TOKEN }}
+          path: site
+
+      - name: Copy latest binaries to site
+        run: |
+          mkdir -p site/releases/latest
+          cp dist/agentscript-* site/releases/latest/
+          cp dist/checksums.txt site/releases/latest/
+          echo "${{ steps.version.outputs.version }}" > site/releases/latest/VERSION
+
+      - name: Push to site repo
+        run: |
+          cd site
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add releases/
+          git commit -m "release: ${{ steps.version.outputs.version }} binaries"
+          git push
