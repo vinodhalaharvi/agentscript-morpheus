@@ -50,7 +50,8 @@ type Command struct {
 		"fmap" | "pfmap" |
 		"<>" |
 		"gcp_check" | "deploy" | "schedule" | "undeploy" | "claude" | "render" |
-		"pdf_fields" | "pdf_fill"
+		"pdf_fields" | "pdf_fill" |
+		"table_render"
 	)`
 	Arg  string `@String?`
 	Arg2 string `@String?`
@@ -60,7 +61,7 @@ type Command struct {
 // Lexer definition — Morpheus operators replace the old -> and parallel{} syntax
 var scriptLexer = lexer.MustSimple([]lexer.SimpleRule{
 	{Name: "Comment", Pattern: `//[^\n]*\n?`},
-	{Name: "Keyword", Pattern: `(search|summarize|save|read|stdin|ask|analyze|list|merge|email|calendar|meet|drive_save|doc_create|sheet_append|sheet_create|task|contact_find|youtube_search|youtube_upload|youtube_shorts|image_generate|image_analyze|video_analyze|video_generate|images_to_video|text_to_speech|audio_video_merge|image_audio_merge|maps_trip|form_create|form_responses|translate|places_search|mcp_connect|mcp_list|mcp_search_install|mcp_search|mcp_agent|mcp|video_script|confirm|github_pages|github_pages_html|job_search|weather|news_headlines|news|stock|crypto|reddit|rss|notify|whatsapp|twitter|foreach|if|match|hf_generate|hf_summarize|hf_classify|hf_ner|hf_translate|hf_embeddings|hf_qa|hf_fill_mask|hf_zero_shot|hf_image_generate|hf_image_classify|hf_speech_to_text|hf_similarity|emoji_style|perplexity_domain|perplexity_recent|perplexity_pro|perplexity|plug_agent|codereview_focus|codereview|agent|ssl_check|ping|dns_lookup|port_check|http_check|whois|fmap|pfmap|gcp_check|deploy|schedule|undeploy|claude|render|pdf_fields|pdf_fill)`},
+	{Name: "Keyword", Pattern: `(search|summarize|save|read|stdin|ask|analyze|list|merge|email|calendar|meet|drive_save|doc_create|sheet_append|sheet_create|task|contact_find|youtube_search|youtube_upload|youtube_shorts|image_generate|image_analyze|video_analyze|video_generate|images_to_video|text_to_speech|audio_video_merge|image_audio_merge|maps_trip|form_create|form_responses|translate|places_search|mcp_connect|mcp_list|mcp_search_install|mcp_search|mcp_agent|mcp|video_script|confirm|github_pages|github_pages_html|job_search|weather|news_headlines|news|stock|crypto|reddit|rss|notify|whatsapp|twitter|foreach|if|match|hf_generate|hf_summarize|hf_classify|hf_ner|hf_translate|hf_embeddings|hf_qa|hf_fill_mask|hf_zero_shot|hf_image_generate|hf_image_classify|hf_speech_to_text|hf_similarity|emoji_style|perplexity_domain|perplexity_recent|perplexity_pro|perplexity|plug_agent|codereview_focus|codereview|agent|ssl_check|ping|dns_lookup|port_check|http_check|whois|fmap|pfmap|gcp_check|deploy|schedule|undeploy|claude|render|pdf_fields|pdf_fill|table_render)`},
 	{Name: "String", Pattern: `"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'`},
 	{Name: "Kleisli", Pattern: `>=>`},
 	{Name: "FanOut", Pattern: `<\*>`},

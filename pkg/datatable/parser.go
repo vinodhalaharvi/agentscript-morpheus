@@ -246,8 +246,8 @@ func parseColumn(line string) (Column, error) {
 // parseSource parses: source <type> <url> [poll=Ns] [field=<name>]
 func parseSource(line string) (Source, string, error) {
 	tokens := tokenize(strings.TrimPrefix(line, "source "))
-	if len(tokens) < 2 {
-		return Source{}, "", fmt.Errorf("source needs type and url: source rest \"url\"")
+	if len(tokens) < 1 {
+		return Source{}, "", fmt.Errorf("source needs a type: source static|rest|sse|ws")
 	}
 
 	src := Source{}
@@ -266,16 +266,25 @@ func parseSource(line string) (Source, string, error) {
 		return Source{}, "", fmt.Errorf("unknown source type %q — use: static rest sse ws", tokens[0])
 	}
 
-	src.URL = tokens[1]
+	// For non-static sources, URL is required
+	if src.Type != SourceStatic && len(tokens) < 2 {
+		return Source{}, "", fmt.Errorf("source %s needs a url: source %s \"url\"", tokens[0], tokens[0])
+	}
 
-	for _, tok := range tokens[2:] {
-		if strings.HasPrefix(tok, "poll=") {
-			val := strings.TrimPrefix(tok, "poll=")
-			val = strings.TrimSuffix(val, "s")
-			fmt.Sscanf(val, "%d", &src.PollSec)
-		}
-		if strings.HasPrefix(tok, "field=") {
-			dataField = strings.TrimPrefix(tok, "field=")
+	if len(tokens) >= 2 {
+		src.URL = tokens[1]
+	}
+
+	if len(tokens) > 2 {
+		for _, tok := range tokens[2:] {
+			if strings.HasPrefix(tok, "poll=") {
+				val := strings.TrimPrefix(tok, "poll=")
+				val = strings.TrimSuffix(val, "s")
+				fmt.Sscanf(val, "%d", &src.PollSec)
+			}
+			if strings.HasPrefix(tok, "field=") {
+				dataField = strings.TrimPrefix(tok, "field=")
+			}
 		}
 	}
 

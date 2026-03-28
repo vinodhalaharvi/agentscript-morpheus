@@ -111,6 +111,15 @@ func (r *Runtime) buildRegistry(c *cache.Cache) *plugin.Registry {
 	// --- DataTable — render .table DSL into self-contained HTML ---
 	reg.Register(datatable.NewPlugin(r.verbose))
 
+	// --- AI Table Render — JSON in, interactive dashboard HTML out ---
+	var tableReasoner datatable.Reasoner
+	if r.claude != nil {
+		tableReasoner = r.claude.Chat
+	} else if r.gemini != nil {
+		tableReasoner = r.gemini.GenerateContent
+	}
+	reg.Register(datatable.NewAIPlugin(tableReasoner, r.verbose))
+
 	// --- MCP Search — searches the official MCP registry
 	// No API key needed — the registry is public
 	reg.Register(mcpsearch.NewPlugin(r.verbose))
