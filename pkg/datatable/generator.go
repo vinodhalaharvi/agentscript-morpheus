@@ -335,7 +335,25 @@ func genDataScript(td *TableDef, jsonData string) string {
 
 	// Embed static data if provided
 	if jsonData != "" {
-		sb.WriteString(fmt.Sprintf("window.__STATIC_DATA__ = %s;\n", jsonData))
+		// Ensure we have valid JSON — strip markdown fences if present
+		cleaned := strings.TrimSpace(jsonData)
+		if strings.HasPrefix(cleaned, "```") {
+			lines := strings.Split(cleaned, "\n")
+			start := 1
+			end := len(lines) - 1
+			if end > start && strings.TrimSpace(lines[end]) == "```" {
+				cleaned = strings.Join(lines[start:end], "\n")
+			}
+		}
+		cleaned = strings.TrimSpace(cleaned)
+		// Escape </script> inside data to prevent HTML parser breakage
+		cleaned = strings.ReplaceAll(cleaned, "</script>", `<\/script>`)
+		// Only embed if it looks like JSON
+		if len(cleaned) > 0 && (cleaned[0] == '[' || cleaned[0] == '{') {
+			sb.WriteString(fmt.Sprintf("window.__STATIC_DATA__ = %s;\n", cleaned))
+		} else {
+			sb.WriteString(fmt.Sprintf("window.__STATIC_DATA__ = %q;\n", cleaned))
+		}
 	}
 
 	// Embed table config
