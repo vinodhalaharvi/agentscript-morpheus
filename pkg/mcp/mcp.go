@@ -124,7 +124,7 @@ func (m *MCPClient) Connect(ctx context.Context, name, command string) error {
 		name:   name,
 		cmd:    cmd,
 		stdin:  stdin,
-		stdout: bufio.NewReader(stdout),
+		stdout: bufio.NewReaderSize(stdout, 1024*1024),
 		reqID:  0,
 	}
 
