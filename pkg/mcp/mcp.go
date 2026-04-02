@@ -207,10 +207,19 @@ func (s *MCPServer) sendRequest(req jsonRPCRequest) (*jsonRPCResponse, error) {
 		return nil, fmt.Errorf("failed to write request: %w", err)
 	}
 
-	// Read response
-	line, err := s.stdout.ReadString('\n')
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
+	// Read response — skip any non-JSON lines (server logs, debug output)
+	var line string
+	for {
+		l, err := s.stdout.ReadString('\n')
+		if err != nil {
+			return nil, fmt.Errorf("failed to read response: %w", err)
+		}
+		trimmed := strings.TrimSpace(l)
+		if len(trimmed) > 0 && trimmed[0] == '{' {
+			line = l
+			break
+		}
+		// Skip non-JSON lines (server logs, debug messages)
 	}
 
 	// Debug: show what we received
