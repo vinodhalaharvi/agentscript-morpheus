@@ -28,6 +28,7 @@ import (
 	"github.com/vinodhalaharvi/agentscript/pkg/network"
 	"github.com/vinodhalaharvi/agentscript/pkg/news"
 	"github.com/vinodhalaharvi/agentscript/pkg/notify"
+	"github.com/vinodhalaharvi/agentscript/pkg/ollama"
 	"github.com/vinodhalaharvi/agentscript/pkg/openai"
 	"github.com/vinodhalaharvi/agentscript/pkg/pdffill"
 	"github.com/vinodhalaharvi/agentscript/pkg/perplexity"
@@ -123,6 +124,11 @@ func (r *Runtime) buildRegistry(c *cache.Cache) *plugin.Registry {
 	// --- MCP Search — searches the official MCP registry
 	// No API key needed — the registry is public
 	reg.Register(mcpsearch.NewPlugin(r.verbose))
+
+	// --- Ollama — local LLM, no data leaves the machine ---
+	// Connects to local Ollama server (default localhost:11434)
+	ollamaClient := ollama.NewClient("", "") // reads OLLAMA_URL and OLLAMA_MODEL from env
+	reg.Register(ollama.NewPlugin(ollamaClient, r.verbose))
 
 	// --- Plug Agent — generates new plugins from English descriptions
 	// Generator is Claude.Chat — injected as functional field seam.
