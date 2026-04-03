@@ -335,7 +335,7 @@ func genDataScript(td *TableDef, jsonData string) string {
 
 	// Embed static data if provided
 	if jsonData != "" {
-		// Ensure we have valid JSON — strip markdown fences if present
+		// Ensure we have valid JSON — strip markdown fences and preamble text
 		cleaned := strings.TrimSpace(jsonData)
 		if strings.HasPrefix(cleaned, "```") {
 			lines := strings.Split(cleaned, "\n")
@@ -343,6 +343,23 @@ func genDataScript(td *TableDef, jsonData string) string {
 			end := len(lines) - 1
 			if end > start && strings.TrimSpace(lines[end]) == "```" {
 				cleaned = strings.Join(lines[start:end], "\n")
+			}
+		}
+		cleaned = strings.TrimSpace(cleaned)
+		// Find the actual JSON — look for first [ or {
+		if idx := strings.Index(cleaned, "["); idx > 0 {
+			cleaned = cleaned[idx:]
+		} else if idx := strings.Index(cleaned, "{"); idx > 0 {
+			cleaned = cleaned[idx:]
+		}
+		// Trim trailing text after the JSON
+		if strings.HasPrefix(cleaned, "[") {
+			if idx := strings.LastIndex(cleaned, "]"); idx >= 0 {
+				cleaned = cleaned[:idx+1]
+			}
+		} else if strings.HasPrefix(cleaned, "{") {
+			if idx := strings.LastIndex(cleaned, "}"); idx >= 0 {
+				cleaned = cleaned[:idx+1]
 			}
 		}
 		cleaned = strings.TrimSpace(cleaned)
