@@ -27,10 +27,11 @@ type Config struct {
 
 // HistoryEntry records a previous loop attempt
 type HistoryEntry struct {
-	Attempt  int
-	Failures []string
-	Proposal string
-	Accepted bool
+	Attempt     int
+	Failures    []string
+	Proposal    string
+	Accepted    bool
+	ApplyErrors []string
 }
 
 // ValidateResult holds one validation check result
@@ -226,17 +227,17 @@ func (e *Engine) Run() error {
 			accepted = e.propose(attempt, proposal)
 		}
 
+		var applyErrors []string
 		if accepted {
-			if err := e.applyProposal(proposal); err != nil {
-				fmt.Printf("❌ Apply error: %v\n", err)
-			}
+			applyErrors = e.applyProposal(proposal)
 		}
 
 		e.history = append(e.history, HistoryEntry{
-			Attempt:  attempt,
-			Failures: e.failureNames(results),
-			Proposal: proposal,
-			Accepted: accepted,
+			Attempt:     attempt,
+			Failures:    e.failureNames(results),
+			Proposal:    proposal,
+			Accepted:    accepted,
+			ApplyErrors: applyErrors,
 		})
 
 		// 6. Wait before next loop
@@ -340,7 +341,13 @@ func (e *Engine) buildPrompt(attempt int, contextOutput string, results []Valida
 		}
 		sb.WriteString("\n## PREVIOUS ATTEMPTS (do NOT repeat failed approaches)\n")
 		for _, h := range e.history[start:] {
-			sb.WriteString(fmt.Sprintf("Attempt %d: failures=%v accepted=%v\n", h.Attempt, h.Failures, h.Accepted))
+			sb.WriteString(fmt.Sprintf("Attempt %d: validation_failures=%v accepted=%v\n", h.Attempt, h.Failures, h.Accepted))
+			if len(h.ApplyErrors) > 0 {
+				sb.WriteString("  COMMAND ERRORS (these commands FAILED — do NOT repeat the same approach):\n")
+				for _, e := range h.ApplyErrors {
+					sb.WriteString(fmt.Sprintf("  - %s\n", e))
+				}
+			}
 		}
 	}
 
@@ -419,9 +426,10 @@ func (e *Engine) propose(attempt int, proposal string) bool {
 	}
 }
 
-// applyProposal writes files and runs commands from the AI response
-func (e *Engine) applyProposal(proposal string) error {
+// applyProposal writes files and runs commands, returns any command errors
+func (e *Engine) applyProposal(proposal string) []string {
 	files, commands := ParseProposal(proposal)
+	var errors []string
 
 	// Write files
 	if len(files) > 0 {
@@ -446,7 +454,9 @@ func (e *Engine) applyProposal(proposal string) error {
 			fmt.Printf("  🔧 Running: %s\n", cmd)
 			out, exitCode := e.sandbox.Exec(cmd)
 			if exitCode != 0 {
+				errMsg := fmt.Sprintf("command '%s' failed (exit %d): %s", cmd, exitCode, strings.TrimSpace(out))
 				fmt.Printf("     ⚠️  exit %d: %s\n", exitCode, strings.TrimSpace(firstLines(out, 3)))
+				errors = append(errors, errMsg)
 			} else {
 				fmt.Printf("     ✅ done\n")
 			}
@@ -457,7 +467,7 @@ func (e *Engine) applyProposal(proposal string) error {
 		fmt.Println("⚠️  No files or commands found in proposal.")
 	}
 
-	return nil
+	return errors
 }
 
 // firstLines returns the first n lines of a string
