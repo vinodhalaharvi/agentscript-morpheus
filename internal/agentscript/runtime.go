@@ -22,6 +22,7 @@ import (
 	aggithub "github.com/vinodhalaharvi/agentscript/pkg/github"
 	"github.com/vinodhalaharvi/agentscript/pkg/google"
 	"github.com/vinodhalaharvi/agentscript/pkg/huggingface"
+	"github.com/vinodhalaharvi/agentscript/pkg/intent"
 	"github.com/vinodhalaharvi/agentscript/pkg/jobsearch"
 	"github.com/vinodhalaharvi/agentscript/pkg/mcp"
 	"github.com/vinodhalaharvi/agentscript/pkg/news"
@@ -161,6 +162,10 @@ func (r *Runtime) RunDSL(ctx context.Context, dsl string) (string, error) {
 //
 //	>=> match "| contains \"rain\" >=> notify \"slack\"\n| _ >=> save \"ok.md\""
 func preprocessDSL(dsl string) string {
+	// First pass: extract converge blocks
+	dsl = preprocessConverge(dsl)
+
+	// Second pass: handle match blocks
 	lines := strings.Split(dsl, "\n")
 	var out []string
 	i := 0
@@ -197,6 +202,143 @@ func preprocessDSL(dsl string) string {
 		out = append(out, lines[i])
 		i++
 	}
+	return strings.Join(out, "\n")
+}
+
+// preprocessConverge extracts converge blocks and rewrites them as:
+//   converge "name" "encoded-body"
+// The body is the raw text between the outermost ( ) of the converge block,
+// with internal quotes escaped and newlines preserved via |||.
+func preprocessConverge(dsl string) string {
+	lines := strings.Split(dsl, "\n")
+	var out []string
+	i := 0
+
+	for i < len(lines) {
+		trimmed := strings.TrimSpace(lines[i])
+
+		// Look for: converge "name" (
+		// or:       >=> converge "name" (
+		isConverge := false
+		prefix := ""
+		if strings.Contains(trimmed, "converge") {
+			// Extract everything before "converge" as a prefix (e.g., ">=> ")
+			idx := strings.Index(trimmed, "converge")
+			prefix = trimmed[:idx]
+			rest := trimmed[idx:]
+			if strings.HasPrefix(rest, "converge") {
+				isConverge = true
+				_ = rest
+			}
+		}
+
+		if !isConverge {
+			out = append(out, lines[i])
+			i++
+			continue
+		}
+
+		// Find the name (first quoted string after converge)
+		convergeLine := trimmed
+		name := ""
+		nameStart := strings.Index(convergeLine, `"`)
+		if nameStart >= 0 {
+			nameEnd := strings.Index(convergeLine[nameStart+1:], `"`)
+			if nameEnd >= 0 {
+				name = convergeLine[nameStart+1 : nameStart+1+nameEnd]
+			}
+		}
+		if name == "" {
+			// Try single quotes
+			nameStart = strings.Index(convergeLine, `'`)
+			if nameStart >= 0 {
+				nameEnd := strings.Index(convergeLine[nameStart+1:], `'`)
+				if nameEnd >= 0 {
+					name = convergeLine[nameStart+1 : nameStart+1+nameEnd]
+				}
+			}
+		}
+
+		// Find the opening ( — might be on this line or next
+		depth := 0
+		started := false
+		var bodyLines []string
+		j := i
+
+		for j < len(lines) {
+			line := lines[j]
+			inDouble := false
+			inSingle := false
+			inBacktick := false
+			prev := byte(0)
+
+			for k := 0; k < len(line); k++ {
+				c := line[k]
+				inQ := inDouble || inSingle || inBacktick
+
+				if !inQ {
+					if c == '"' { inDouble = true } else
+					if c == '\'' { inSingle = true } else
+					if c == '`' { inBacktick = true }
+				} else {
+					if c == '"' && inDouble && prev != '\\' { inDouble = false } else
+					if c == '\'' && inSingle && prev != '\\' { inSingle = false } else
+					if c == '`' && inBacktick { inBacktick = false }
+				}
+
+				if !inDouble && !inSingle && !inBacktick {
+					if c == '(' {
+						depth++
+						if !started {
+							started = true
+							prev = c
+							continue
+						}
+					} else if c == ')' && started {
+						depth--
+						if depth == 0 {
+							// Encode the body: escape quotes, join with |||
+							body := strings.Join(bodyLines, "|||")
+							// Also capture remainder of this line before )
+							body = strings.ReplaceAll(body, `"`, `\"`)
+							rewritten := prefix + `converge "` + name + `" "` + body + `"`
+							out = append(out, rewritten)
+							j++
+							goto nextLine
+						}
+					}
+				}
+
+				if started && depth > 0 {
+					// We're inside the body — will be captured below
+				}
+				prev = c
+			}
+
+			if started && depth > 0 {
+				// Capture entire line as part of body (skip the opening line's pre-( content)
+				if j == i {
+					// First line — capture from after the (
+					openIdx := strings.Index(line, "(")
+					if openIdx >= 0 && openIdx+1 < len(line) {
+						bodyLines = append(bodyLines, strings.TrimSpace(line[openIdx+1:]))
+					}
+				} else {
+					bodyLines = append(bodyLines, line)
+				}
+			}
+			j++
+		}
+
+		// If we get here, unclosed block — just pass through
+		out = append(out, lines[i])
+		i++
+		continue
+
+	nextLine:
+		i = j
+	}
+
 	return strings.Join(out, "\n")
 }
 
@@ -517,6 +659,10 @@ func (r *Runtime) executeCommand(ctx context.Context, cmd *Command, input string
 	case "emoji_style":
 		result, err = r.emojiStyleCmd(ctx, cmd.Arg, cmd.Arg2, cmd.Arg3, input)
 
+	// ==================== Converge (intent-driven loop) ====================
+	case "converge":
+		result, err = r.executeConverge(ctx, cmd.Arg, cmd.Arg2, input)
+
 	default:
 		err = fmt.Errorf("unknown action: %s", cmd.Action)
 	}
@@ -527,6 +673,71 @@ func (r *Runtime) executeCommand(ctx context.Context, cmd *Command, input string
 
 	r.log("Result: %d bytes", len(result))
 	return result, nil
+}
+
+// executeConverge runs an intent-driven reconciliation loop.
+// name is the converge block name, body is the encoded body (||| separated lines).
+func (r *Runtime) executeConverge(ctx context.Context, name, encodedBody, input string) (string, error) {
+	// Decode the body: ||| back to newlines, unescape quotes
+	body := strings.ReplaceAll(encodedBody, "|||", "\n")
+	body = strings.ReplaceAll(body, `\"`, `"`)
+
+	// If there was piped input, make it available as a file the context can read
+	if input != "" {
+		os.WriteFile(".converge-input.txt", []byte(input), 0644)
+		defer os.Remove(".converge-input.txt")
+	}
+
+	// Parse the body using the intent parser
+	cfg, err := intent.ParseFile(body)
+	if err != nil {
+		return "", fmt.Errorf("converge %q parse error: %w", name, err)
+	}
+
+	// Build reasoner function
+	reasonerFn := func(prompt string) (string, error) {
+		return r.RunDSL(ctx, fmt.Sprintf("claude %q", prompt))
+	}
+	if cfg.Reasoner == "ollama" {
+		if cfg.ReasonerModel != "" {
+			reasonerFn = func(prompt string) (string, error) {
+				return r.RunDSL(ctx, fmt.Sprintf("ollama %q %q", prompt, cfg.ReasonerModel))
+			}
+		} else {
+			reasonerFn = func(prompt string) (string, error) {
+				return r.RunDSL(ctx, fmt.Sprintf("ollama %q", prompt))
+			}
+		}
+	}
+
+	// Build DSL runner
+	runDSL := func(dsl string) (string, error) {
+		return r.RunDSL(ctx, dsl)
+	}
+
+	// Create and run engine
+	engine, err := intent.NewEngine(*cfg, reasonerFn, runDSL)
+	if err != nil {
+		return "", fmt.Errorf("converge %q engine error: %w", name, err)
+	}
+
+	fmt.Printf("\n🎯 Converge: %s\n", name)
+	fmt.Printf("   Sandbox:  %s\n", cfg.Sandbox)
+	fmt.Printf("   Reasoner: %s", cfg.Reasoner)
+	if cfg.ReasonerModel != "" {
+		fmt.Printf(" (%s)", cfg.ReasonerModel)
+	}
+	fmt.Println()
+	fmt.Printf("   Retries:  %d (delay %ds)\n", cfg.MaxRetries, cfg.RetryDelay)
+	fmt.Printf("   Mode:     %s\n", cfg.Mode)
+	fmt.Printf("   Intents:  %d\n", len(cfg.Intents))
+	fmt.Printf("   Checks:   %d\n", len(cfg.ValidateCmds))
+
+	if err := engine.Run(); err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("converge %q: all intents satisfied", name), nil
 }
 
 // geminiCall makes a call to the Gemini API

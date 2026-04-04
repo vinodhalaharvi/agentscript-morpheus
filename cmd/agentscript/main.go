@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/vinodhalaharvi/agentscript/internal/agentscript"
+	"github.com/vinodhalaharvi/agentscript/pkg/intent"
 )
 
 func main() {
@@ -109,7 +110,16 @@ func executeFile(ctx context.Context, rt *agentscript.Runtime, path string) {
 		fmt.Fprintf(os.Stderr, "Error reading file: %v\n", err)
 		os.Exit(1)
 	}
-	executeScript(ctx, rt, string(data))
+
+	content := string(data)
+
+	// Check if this file has intent blocks
+	if hasIntentBlocks(content) {
+		executeIntent(ctx, rt, content)
+		return
+	}
+
+	executeScript(ctx, rt, content)
 }
 
 func executeNatural(ctx context.Context, rt *agentscript.Runtime, trans *agentscript.Translator, input string) {
@@ -274,4 +284,72 @@ func coalesce(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// hasIntentBlocks checks if a .as file contains context/intent/validate blocks
+func hasIntentBlocks(content string) bool {
+	lines := strings.Split(content, "\n")
+	for _, line := range lines {
+		t := strings.TrimSpace(line)
+		if strings.HasPrefix(t, "intent ") || strings.HasPrefix(t, "intent(") ||
+			strings.HasPrefix(t, "context ") || strings.HasPrefix(t, "context(") ||
+			strings.HasPrefix(t, "validate ") || strings.HasPrefix(t, "validate(") {
+			return true
+		}
+	}
+	return false
+}
+
+// executeIntent runs the intent reconciliation loop
+func executeIntent(ctx context.Context, rt *agentscript.Runtime, content string) {
+	cfg, err := intent.ParseFile(content)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Intent parse error: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Build the reasoner function based on config
+	reasonerFn := func(prompt string) (string, error) {
+		return rt.RunDSL(ctx, fmt.Sprintf("claude %q", prompt))
+	}
+	if cfg.Reasoner == "ollama" {
+		if cfg.ReasonerModel != "" {
+			reasonerFn = func(prompt string) (string, error) {
+				return rt.RunDSL(ctx, fmt.Sprintf("ollama %q %q", prompt, cfg.ReasonerModel))
+			}
+		} else {
+			reasonerFn = func(prompt string) (string, error) {
+				return rt.RunDSL(ctx, fmt.Sprintf("ollama %q", prompt))
+			}
+		}
+	}
+
+	// Build the DSL runner
+	runDSL := func(dsl string) (string, error) {
+		return rt.RunDSL(ctx, dsl)
+	}
+
+	engine, err := intent.NewEngine(*cfg, reasonerFn, runDSL)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Intent engine error: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("🎯 AgentScript Intent Mode")
+	fmt.Printf("   Sandbox:  %s\n", cfg.Sandbox)
+	fmt.Printf("   Reasoner: %s", cfg.Reasoner)
+	if cfg.ReasonerModel != "" {
+		fmt.Printf(" (%s)", cfg.ReasonerModel)
+	}
+	fmt.Println()
+	fmt.Printf("   Retries:  %d (delay %ds)\n", cfg.MaxRetries, cfg.RetryDelay)
+	fmt.Printf("   Mode:     %s\n", cfg.Mode)
+	fmt.Printf("   Intents:  %d\n", len(cfg.Intents))
+	fmt.Printf("   Checks:   %d\n", len(cfg.ValidateCmds))
+	fmt.Println()
+
+	if err := engine.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "\n%v\n", err)
+		os.Exit(1)
+	}
 }

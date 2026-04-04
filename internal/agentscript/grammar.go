@@ -52,7 +52,8 @@ type Command struct {
 		"gcp_check" | "deploy" | "schedule" | "undeploy" | "claude" | "render" |
 		"pdf_fields" | "pdf_fill" |
 		"table_render" |
-		"ollama"
+		"ollama" |
+		"converge"
 	)`
 	Arg  string `@String?`
 	Arg2 string `@String?`
@@ -62,8 +63,8 @@ type Command struct {
 // Lexer definition — Morpheus operators replace the old -> and parallel{} syntax
 var scriptLexer = lexer.MustSimple([]lexer.SimpleRule{
 	{Name: "Comment", Pattern: `//[^\n]*\n?`},
-	{Name: "Keyword", Pattern: `(search|summarize|save|read|stdin|ask|analyze|list|merge|email|calendar|meet|drive_save|doc_create|sheet_append|sheet_create|task|contact_find|youtube_search|youtube_upload|youtube_shorts|image_generate|image_analyze|video_analyze|video_generate|images_to_video|text_to_speech|audio_video_merge|image_audio_merge|maps_trip|form_create|form_responses|translate|places_search|mcp_connect|mcp_list|mcp_search_install|mcp_search|mcp_agent|mcp|video_script|confirm|github_pages|github_pages_html|job_search|weather|news_headlines|news|stock|crypto|reddit|rss|notify|whatsapp|twitter|foreach|if|match|hf_generate|hf_summarize|hf_classify|hf_ner|hf_translate|hf_embeddings|hf_qa|hf_fill_mask|hf_zero_shot|hf_image_generate|hf_image_classify|hf_speech_to_text|hf_similarity|emoji_style|perplexity_domain|perplexity_recent|perplexity_pro|perplexity|plug_agent|codereview_focus|codereview|agent|ssl_check|ping|dns_lookup|port_check|http_check|whois|fmap|pfmap|gcp_check|deploy|schedule|undeploy|claude|render|pdf_fields|pdf_fill|table_render|ollama)`},
-	{Name: "String", Pattern: `"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'`},
+	{Name: "Keyword", Pattern: `(search|summarize|save|read|stdin|ask|analyze|list|merge|email|calendar|meet|drive_save|doc_create|sheet_append|sheet_create|task|contact_find|youtube_search|youtube_upload|youtube_shorts|image_generate|image_analyze|video_analyze|video_generate|images_to_video|text_to_speech|audio_video_merge|image_audio_merge|maps_trip|form_create|form_responses|translate|places_search|mcp_connect|mcp_list|mcp_search_install|mcp_search|mcp_agent|mcp|video_script|confirm|github_pages|github_pages_html|job_search|weather|news_headlines|news|stock|crypto|reddit|rss|notify|whatsapp|twitter|foreach|if|match|hf_generate|hf_summarize|hf_classify|hf_ner|hf_translate|hf_embeddings|hf_qa|hf_fill_mask|hf_zero_shot|hf_image_generate|hf_image_classify|hf_speech_to_text|hf_similarity|emoji_style|perplexity_domain|perplexity_recent|perplexity_pro|perplexity|plug_agent|codereview_focus|codereview|agent|ssl_check|ping|dns_lookup|port_check|http_check|whois|fmap|pfmap|gcp_check|deploy|schedule|undeploy|claude|render|pdf_fields|pdf_fill|table_render|ollama|converge)`},
+	{Name: "String", Pattern: "`[^`]*`" + `|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'`},
 	{Name: "Kleisli", Pattern: `>=>`},
 	{Name: "FanOut", Pattern: `<\*>`},
 	{Name: "Semigroup", Pattern: `<>`},
@@ -76,8 +77,21 @@ var scriptLexer = lexer.MustSimple([]lexer.SimpleRule{
 var Parser = participle.MustBuild[Program](
 	participle.Lexer(scriptLexer),
 	participle.Elide("Whitespace", "Comment"),
-	participle.Unquote("String"),
+	participle.Map(unquoteString, "String"),
 )
+
+// unquoteString strips surrounding quotes from string tokens, supporting ", ', and `
+func unquoteString(token lexer.Token) (lexer.Token, error) {
+	s := token.Value
+	if len(s) >= 2 {
+		first := s[0]
+		last := s[len(s)-1]
+		if (first == '"' && last == '"') || (first == '\'' && last == '\'') || (first == '`' && last == '`') {
+			token.Value = s[1 : len(s)-1]
+		}
+	}
+	return token, nil
+}
 
 // Parse parses a Morpheus AgentScript program from a string.
 // Always preprocesses to handle multiline match blocks.
