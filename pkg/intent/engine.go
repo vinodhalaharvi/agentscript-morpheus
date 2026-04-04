@@ -345,9 +345,12 @@ func (e *Engine) buildPrompt(attempt int, contextOutput string, results []Valida
 	}
 
 	sb.WriteString("\n## RESPONSE FORMAT\n")
-	sb.WriteString("Respond with ONLY a JSON object where keys are file paths relative to the project root and values are the COMPLETE file contents.\n")
-	sb.WriteString("```json\n{\n  \"path/to/file.go\": \"package main\\n...\",\n  \"go.mod\": \"module example.com/myapp\\n...\"\n}\n```\n")
-	sb.WriteString("Only include files that need to be created or modified. Do NOT include unchanged files.\n")
+	sb.WriteString("Respond with ONLY a JSON object with two keys: \"files\" and \"commands\".\n")
+	sb.WriteString("\"files\" is an object where keys are file paths and values are COMPLETE file contents.\n")
+	sb.WriteString("\"commands\" is an array of shell commands to run AFTER files are written (e.g. go mod tidy, buf generate).\n")
+	sb.WriteString("```json\n{\n  \"files\": {\n    \"go.mod\": \"module myapp\\n...\",\n    \"cmd/main.go\": \"package main\\n...\"\n  },\n  \"commands\": [\n    \"go mod tidy\",\n    \"buf generate\"\n  ]\n}\n```\n")
+	sb.WriteString("Only include files that need to be created or modified. Do NOT include go.sum — use 'go mod tidy' in commands instead.\n")
+	sb.WriteString("Commands run inside the sandbox directory. Use commands for things that cannot be expressed as file contents.\n")
 	sb.WriteString(fmt.Sprintf("This is attempt %d of %d. Fix ALL validation failures.\n", attempt, e.config.MaxRetries))
 
 	return sb.String()
@@ -355,7 +358,7 @@ func (e *Engine) buildPrompt(attempt int, contextOutput string, results []Valida
 
 // propose shows the plan and waits for human approval
 func (e *Engine) propose(attempt int, proposal string) bool {
-	files := ParseFiles(proposal)
+	files, commands := ParseProposal(proposal)
 
 	fmt.Printf("\n┌──────────────────────────────────────────────────┐\n")
 	fmt.Printf("│  PROPOSED FIX (attempt %d/%d)                       \n", attempt, e.config.MaxRetries)
@@ -365,7 +368,15 @@ func (e *Engine) propose(attempt int, proposal string) bool {
 			lines := strings.Count(content, "\n") + 1
 			fmt.Printf("│  📄 %-35s (%d lines)\n", path, lines)
 		}
-	} else {
+	}
+	if len(commands) > 0 {
+		fmt.Printf("│                                                  │\n")
+		fmt.Printf("│  🔧 Commands:                                    │\n")
+		for i, cmd := range commands {
+			fmt.Printf("│     %d. %-42s\n", i+1, cmd)
+		}
+	}
+	if len(files) == 0 && len(commands) == 0 {
 		lines := strings.Split(proposal, "\n")
 		for i, l := range lines {
 			if i >= 8 {
@@ -408,26 +419,54 @@ func (e *Engine) propose(attempt int, proposal string) bool {
 	}
 }
 
-// applyProposal writes files from the AI response to the sandbox
+// applyProposal writes files and runs commands from the AI response
 func (e *Engine) applyProposal(proposal string) error {
-	files := ParseFiles(proposal)
-	if len(files) == 0 {
-		fmt.Println("⚠️  No files found in proposal.")
-		return nil
-	}
-	for path, content := range files {
-		if !e.sandbox.IsSafe(path) {
-			fmt.Printf("🚫 Sandbox violation: %s — skipped\n", path)
-			continue
+	files, commands := ParseProposal(proposal)
+
+	// Write files
+	if len(files) > 0 {
+		for path, content := range files {
+			if !e.sandbox.IsSafe(path) {
+				fmt.Printf("🚫 Sandbox violation: %s — skipped\n", path)
+				continue
+			}
+			if err := e.sandbox.WriteFile(path, content); err != nil {
+				fmt.Printf("❌ Write failed %s: %v\n", path, err)
+				continue
+			}
+			lines := strings.Count(content, "\n") + 1
+			fmt.Printf("  ✏️  %s (%d lines)\n", path, lines)
 		}
-		if err := e.sandbox.WriteFile(path, content); err != nil {
-			fmt.Printf("❌ Write failed %s: %v\n", path, err)
-			continue
-		}
-		lines := strings.Count(content, "\n") + 1
-		fmt.Printf("  ✏️  %s (%d lines)\n", path, lines)
 	}
+
+	// Run commands
+	if len(commands) > 0 {
+		fmt.Println()
+		for _, cmd := range commands {
+			fmt.Printf("  🔧 Running: %s\n", cmd)
+			out, exitCode := e.sandbox.Exec(cmd)
+			if exitCode != 0 {
+				fmt.Printf("     ⚠️  exit %d: %s\n", exitCode, strings.TrimSpace(firstLines(out, 3)))
+			} else {
+				fmt.Printf("     ✅ done\n")
+			}
+		}
+	}
+
+	if len(files) == 0 && len(commands) == 0 {
+		fmt.Println("⚠️  No files or commands found in proposal.")
+	}
+
 	return nil
+}
+
+// firstLines returns the first n lines of a string
+func firstLines(s string, n int) string {
+	lines := strings.Split(s, "\n")
+	if len(lines) > n {
+		lines = lines[:n]
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (e *Engine) failureNames(results []ValidateResult) []string {
@@ -440,7 +479,168 @@ func (e *Engine) failureNames(results []ValidateResult) []string {
 	return out
 }
 
-// ParseFiles extracts {path: content} from an AI response
+// ParseProposal extracts files and commands from an AI response.
+// Supports two formats:
+//   1. New: {"files": {path: content}, "commands": ["cmd1", "cmd2"]}
+//   2. Legacy: {path: content} (no commands)
+func ParseProposal(response string) (map[string]string, []string) {
+	response = strings.TrimSpace(response)
+
+	// Strip markdown fences
+	if idx := strings.Index(response, "```json"); idx >= 0 {
+		response = response[idx+7:]
+		if end := strings.Index(response, "```"); end >= 0 {
+			response = response[:end]
+		}
+	} else if idx := strings.Index(response, "```"); idx >= 0 {
+		response = response[idx+3:]
+		if nl := strings.Index(response, "\n"); nl >= 0 {
+			response = response[nl+1:]
+		}
+		if end := strings.Index(response, "```"); end >= 0 {
+			response = response[:end]
+		}
+	}
+
+	response = strings.TrimSpace(response)
+	if idx := strings.Index(response, "{"); idx >= 0 {
+		response = response[idx:]
+	}
+	if idx := strings.LastIndex(response, "}"); idx >= 0 {
+		response = response[:idx+1]
+	}
+
+	// Try to detect new format: look for "files" and "commands" keys
+	if strings.Contains(response, `"files"`) {
+		files, commands := parseNewFormat(response)
+		if len(files) > 0 || len(commands) > 0 {
+			return files, commands
+		}
+	}
+
+	// Fall back to legacy format: {path: content}
+	files := ParseFiles(response)
+	return files, nil
+}
+
+// parseNewFormat extracts from {"files": {...}, "commands": [...]}
+func parseNewFormat(response string) (map[string]string, []string) {
+	files := make(map[string]string)
+	var commands []string
+
+	// Extract the "files" object
+	filesIdx := strings.Index(response, `"files"`)
+	if filesIdx >= 0 {
+		// Find the opening { after "files":
+		rest := response[filesIdx+7:]
+		colonIdx := strings.Index(rest, ":")
+		if colonIdx >= 0 {
+			rest = rest[colonIdx+1:]
+			// Find matching { }
+			braceStart := strings.Index(rest, "{")
+			if braceStart >= 0 {
+				depth := 0
+				inStr := false
+				esc := false
+				end := -1
+				for i := braceStart; i < len(rest); i++ {
+					c := rest[i]
+					if esc {
+						esc = false
+						continue
+					}
+					if c == '\\' && inStr {
+						esc = true
+						continue
+					}
+					if c == '"' {
+						inStr = !inStr
+					}
+					if !inStr {
+						if c == '{' {
+							depth++
+						} else if c == '}' {
+							depth--
+							if depth == 0 {
+								end = i
+								break
+							}
+						}
+					}
+				}
+				if end >= 0 {
+					filesJSON := rest[braceStart : end+1]
+					files = ParseFiles(filesJSON)
+				}
+			}
+		}
+	}
+
+	// Extract the "commands" array
+	cmdsIdx := strings.Index(response, `"commands"`)
+	if cmdsIdx >= 0 {
+		rest := response[cmdsIdx+10:]
+		colonIdx := strings.Index(rest, ":")
+		if colonIdx >= 0 {
+			rest = rest[colonIdx+1:]
+			bracketStart := strings.Index(rest, "[")
+			if bracketStart >= 0 {
+				bracketEnd := strings.Index(rest[bracketStart:], "]")
+				if bracketEnd >= 0 {
+					arrStr := rest[bracketStart : bracketStart+bracketEnd+1]
+					// Simple extraction of quoted strings from array
+					inQ := false
+					esc := false
+					var current strings.Builder
+					for i := 1; i < len(arrStr)-1; i++ {
+						c := arrStr[i]
+						if esc {
+							switch c {
+							case 'n':
+								current.WriteByte('\n')
+							case 't':
+								current.WriteByte('\t')
+							case '"':
+								current.WriteByte('"')
+							case '\\':
+								current.WriteByte('\\')
+							default:
+								current.WriteByte('\\')
+								current.WriteByte(c)
+							}
+							esc = false
+							continue
+						}
+						if c == '\\' && inQ {
+							esc = true
+							continue
+						}
+						if c == '"' {
+							if !inQ {
+								inQ = true
+							} else {
+								inQ = false
+								cmd := strings.TrimSpace(current.String())
+								if cmd != "" {
+									commands = append(commands, cmd)
+								}
+								current.Reset()
+							}
+							continue
+						}
+						if inQ {
+							current.WriteByte(c)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return files, commands
+}
+
+// ParseFiles extracts {path: content} from an AI response (legacy format)
 func ParseFiles(response string) map[string]string {
 	response = strings.TrimSpace(response)
 
