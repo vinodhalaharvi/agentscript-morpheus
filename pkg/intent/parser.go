@@ -164,10 +164,6 @@ func extractBlock(lines []string, startLine int) (string, int, error) {
 
 	return "", len(lines), fmt.Errorf("unclosed block starting at line %d", startLine+1)
 }
-	}
-
-	return "", len(lines), fmt.Errorf("unclosed block starting at line %d", startLine+1)
-}
 
 // parseContextBlock parses the body of context(...)
 func parseContextBlock(block string, cfg *Config) {
