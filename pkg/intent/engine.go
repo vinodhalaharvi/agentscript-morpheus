@@ -23,6 +23,14 @@ type Config struct {
 	ValidateCmds  []string // shell commands that must exit 0
 	HistoryCount  int
 	PipelineDSL   string // the main pipeline DSL (everything before context/intent/validate)
+
+	// Git patch mode
+	PatchMode    bool   // true = unified diffs, false = full files (scaffold)
+	Branch       string // git branch to create/checkout
+	Base         string // base branch for rebase (e.g. "main")
+	AutoCommit   bool   // commit after each accepted proposal
+	AutoRebase   bool   // rebase on base before each loop
+	CommitPrefix string // prefix for commit messages (default "converge")
 }
 
 // HistoryEntry records a previous loop attempt
@@ -177,8 +185,21 @@ func (e *Engine) Run() error {
 		}
 	}
 
+	// Git setup — create/checkout branch if patch mode
+	if e.config.PatchMode && e.config.Branch != "" {
+		e.gitSetup()
+	}
+	if e.config.CommitPrefix == "" {
+		e.config.CommitPrefix = "converge"
+	}
+
 	for attempt := 1; attempt <= e.config.MaxRetries; attempt++ {
 		fmt.Printf("\n🔄 ═══ Intent Loop — Attempt %d/%d ═══\n\n", attempt, e.config.MaxRetries)
+
+		// Git rebase if enabled
+		if e.config.AutoRebase && e.config.Base != "" {
+			e.gitRebase()
+		}
 
 		// 1. Collect context
 		fmt.Println("📋 Collecting context...")
@@ -230,6 +251,11 @@ func (e *Engine) Run() error {
 		var applyErrors []string
 		if accepted {
 			applyErrors = e.applyProposal(proposal)
+
+			// Git commit if enabled
+			if e.config.AutoCommit {
+				e.gitCommit(attempt)
+			}
 		}
 
 		e.history = append(e.history, HistoryEntry{
@@ -358,7 +384,21 @@ func (e *Engine) buildPrompt(attempt int, contextOutput string, results []Valida
 	sb.WriteString("```json\n{\n  \"files\": {\n    \"go.mod\": \"module myapp\\n...\",\n    \"cmd/main.go\": \"package main\\n...\"\n  },\n  \"commands\": [\n    \"go mod tidy\",\n    \"buf generate\"\n  ]\n}\n```\n")
 	sb.WriteString("Only include files that need to be created or modified. Do NOT include go.sum — use 'go mod tidy' in commands instead.\n")
 	sb.WriteString("Commands run inside the sandbox directory. Use commands for things that cannot be expressed as file contents.\n")
-	sb.WriteString(fmt.Sprintf("This is attempt %d of %d. Fix ALL validation failures.\n", attempt, e.config.MaxRetries))
+
+	if e.config.PatchMode {
+		sb.WriteString("\n## GIT CONTEXT\n")
+		sb.WriteString("This project is under git version control.\n")
+		if e.config.Branch != "" {
+			sb.WriteString(fmt.Sprintf("Working branch: %s\n", e.config.Branch))
+		}
+		if e.config.Base != "" {
+			sb.WriteString(fmt.Sprintf("Base branch: %s\n", e.config.Base))
+		}
+		sb.WriteString("Each accepted proposal will be committed automatically. Keep changes focused and atomic.\n")
+		sb.WriteString("Avoid modifying files unrelated to the current validation failure.\n")
+	}
+
+	sb.WriteString(fmt.Sprintf("\nThis is attempt %d of %d. Fix ALL validation failures.\n", attempt, e.config.MaxRetries))
 
 	return sb.String()
 }
@@ -369,6 +409,9 @@ func (e *Engine) propose(attempt int, proposal string) bool {
 
 	fmt.Printf("\n┌──────────────────────────────────────────────────┐\n")
 	fmt.Printf("│  PROPOSED FIX (attempt %d/%d)                       \n", attempt, e.config.MaxRetries)
+	if e.config.Branch != "" {
+		fmt.Printf("│  branch: %-40s\n", e.config.Branch)
+	}
 	fmt.Printf("│                                                  │\n")
 	if len(files) > 0 {
 		for path, content := range files {
@@ -382,6 +425,10 @@ func (e *Engine) propose(attempt int, proposal string) bool {
 		for i, cmd := range commands {
 			fmt.Printf("│     %d. %-42s\n", i+1, cmd)
 		}
+	}
+	if e.config.AutoCommit {
+		fmt.Printf("│                                                  │\n")
+		fmt.Printf("│  📦 Will auto-commit after apply                 │\n")
 	}
 	if len(files) == 0 && len(commands) == 0 {
 		lines := strings.Split(proposal, "\n")
@@ -397,7 +444,7 @@ func (e *Engine) propose(attempt int, proposal string) bool {
 		}
 	}
 	fmt.Printf("│                                                  │\n")
-	fmt.Printf("│  [y]es  [n]o  [v]iew  [s]kip                    │\n")
+	fmt.Printf("│  [y]es  [n]o  [v]iew  [d]iff  [s]kip            │\n")
 	fmt.Printf("└──────────────────────────────────────────────────┘\n")
 	fmt.Print("\n> ")
 
@@ -405,6 +452,9 @@ func (e *Engine) propose(attempt int, proposal string) bool {
 	for {
 		input, _ := reader.ReadString('\n')
 		input = strings.TrimSpace(strings.ToLower(input))
+		if input == "" {
+			continue
+		}
 		switch input {
 		case "y", "yes":
 			return true
@@ -416,12 +466,26 @@ func (e *Engine) propose(attempt int, proposal string) bool {
 			fmt.Println("\n--- Full Proposal ---")
 			fmt.Println(proposal)
 			fmt.Println("--- End ---\n")
+			fmt.Print("[y/n/d/s] > ")
+		case "d", "diff":
+			for path, content := range files {
+				fmt.Printf("\n--- %s ---\n", path)
+				lines := strings.Split(content, "\n")
+				for i, l := range lines {
+					if i >= 30 {
+						fmt.Printf("... (%d more lines)\n", len(lines)-30)
+						break
+					}
+					fmt.Printf("+ %s\n", l)
+				}
+			}
+			fmt.Println()
 			fmt.Print("[y/n/s] > ")
 		case "s", "skip":
 			fmt.Println("⏭  Skipped.")
 			return false
 		default:
-			fmt.Print("[y/n/v/s] > ")
+			fmt.Print("[y/n/v/d/s] > ")
 		}
 	}
 }
@@ -487,6 +551,104 @@ func (e *Engine) failureNames(results []ValidateResult) []string {
 		}
 	}
 	return out
+}
+
+// ─── Git operations ──────────────────────────────────
+
+// gitSetup creates or checks out the branch
+func (e *Engine) gitSetup() {
+	// Check if we're in a git repo
+	_, code := e.sandbox.Exec("git rev-parse --is-inside-work-tree")
+	if code != 0 {
+		// Init a new repo
+		fmt.Println("📦 Initializing git repo...")
+		e.sandbox.Exec("git init")
+		e.sandbox.Exec("git add -A")
+		e.sandbox.Exec(`git commit -m "initial commit" --allow-empty`)
+	}
+
+	// Check current branch
+	out, code := e.sandbox.Exec("git rev-parse --abbrev-ref HEAD")
+	currentBranch := strings.TrimSpace(out)
+	if code == 0 && currentBranch == e.config.Branch {
+		fmt.Printf("📌 Already on branch: %s\n", e.config.Branch)
+		return
+	}
+
+	// Try checkout existing, or create new
+	_, code = e.sandbox.Exec(fmt.Sprintf("git checkout %s 2>/dev/null || git checkout -b %s", e.config.Branch, e.config.Branch))
+	if code == 0 {
+		fmt.Printf("📌 Branch: %s\n", e.config.Branch)
+	} else {
+		fmt.Printf("⚠️  Failed to checkout branch %s\n", e.config.Branch)
+	}
+}
+
+// gitRebase rebases current branch on base
+func (e *Engine) gitRebase() {
+	fmt.Printf("🔀 Rebasing on %s...\n", e.config.Base)
+
+	// Stash any uncommitted changes first
+	e.sandbox.Exec("git stash")
+
+	out, code := e.sandbox.Exec(fmt.Sprintf("git rebase %s", e.config.Base))
+	if code != 0 {
+		if strings.Contains(out, "CONFLICT") {
+			fmt.Printf("⚠️  Rebase conflict detected — aborting rebase\n")
+			lines := strings.Split(strings.TrimSpace(out), "\n")
+			for i, l := range lines {
+				if i >= 5 {
+					break
+				}
+				fmt.Printf("     %s\n", l)
+			}
+			e.sandbox.Exec("git rebase --abort")
+		} else {
+			fmt.Printf("⚠️  Rebase failed: %s\n", firstLines(out, 3))
+			e.sandbox.Exec("git rebase --abort")
+		}
+	} else {
+		fmt.Println("  ✅ Rebase clean")
+	}
+
+	// Pop stash if we stashed
+	e.sandbox.Exec("git stash pop 2>/dev/null")
+}
+
+// gitCommit stages all changes and commits
+func (e *Engine) gitCommit(attempt int) {
+	// Stage everything
+	e.sandbox.Exec("git add -A")
+
+	// Check if there's anything to commit
+	out, code := e.sandbox.Exec("git status --porcelain")
+	if code == 0 && strings.TrimSpace(out) == "" {
+		fmt.Println("📦 Nothing to commit")
+		return
+	}
+
+	// Generate commit message
+	msg := fmt.Sprintf("%s: attempt %d", e.config.CommitPrefix, attempt)
+
+	// Try to make a more descriptive message from the changes
+	diffStat, _ := e.sandbox.Exec("git diff --cached --stat")
+	diffLines := strings.Split(strings.TrimSpace(diffStat), "\n")
+	if len(diffLines) > 0 {
+		// Count files changed
+		lastLine := diffLines[len(diffLines)-1]
+		if strings.Contains(lastLine, "changed") {
+			msg = fmt.Sprintf("%s: attempt %d — %s", e.config.CommitPrefix, attempt, strings.TrimSpace(lastLine))
+		}
+	}
+
+	_, code = e.sandbox.Exec(fmt.Sprintf("git commit -m %q", msg))
+	if code == 0 {
+		fmt.Printf("📦 %s\n", msg)
+
+		// Show the short log
+		logOut, _ := e.sandbox.Exec("git log --oneline -1")
+		fmt.Printf("   %s\n", strings.TrimSpace(logOut))
+	}
 }
 
 // ParseProposal extracts files and commands from an AI response.

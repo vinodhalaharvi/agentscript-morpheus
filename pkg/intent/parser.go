@@ -34,6 +34,12 @@ func ParseFile(content string) (*Config, error) {
 			continue
 		}
 
+		// Top-level converge config (before context/intent/validate)
+		if parseTopLevelConfig(trimmed, cfg) {
+			i++
+			continue
+		}
+
 		// context (
 		if strings.HasPrefix(trimmed, "context") && strings.Contains(trimmed, "(") {
 			block, end, err := extractBlock(lines, i)
@@ -165,6 +171,78 @@ func extractBlock(lines []string, startLine int) (string, int, error) {
 	return "", len(lines), fmt.Errorf("unclosed block starting at line %d", startLine+1)
 }
 
+// parseTopLevelConfig handles config directives at the converge top level.
+// Returns true if the line was consumed as config.
+func parseTopLevelConfig(trimmed string, cfg *Config) bool {
+	// sandbox "dir/"
+	if strings.HasPrefix(trimmed, "sandbox ") {
+		cfg.Sandbox = unquote(strings.TrimPrefix(trimmed, "sandbox "))
+		return true
+	}
+
+	// reasoner claude
+	// reasoner ollama "llama3:8b"
+	if strings.HasPrefix(trimmed, "reasoner ") {
+		parts := splitArgs(strings.TrimPrefix(trimmed, "reasoner "))
+		if len(parts) >= 1 {
+			cfg.Reasoner = parts[0]
+		}
+		if len(parts) >= 2 {
+			cfg.ReasonerModel = unquote(parts[1])
+		}
+		return true
+	}
+
+	// history 3
+	if strings.HasPrefix(trimmed, "history ") {
+		if n, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(trimmed, "history "))); err == nil {
+			cfg.HistoryCount = n
+		}
+		return true
+	}
+
+	// mode patch | mode scaffold
+	if strings.HasPrefix(trimmed, "mode ") {
+		m := strings.TrimSpace(strings.TrimPrefix(trimmed, "mode "))
+		if m == "patch" {
+			cfg.PatchMode = true
+		}
+		return true
+	}
+
+	// branch "feature/xyz"
+	if strings.HasPrefix(trimmed, "branch ") {
+		cfg.Branch = unquote(strings.TrimPrefix(trimmed, "branch "))
+		return true
+	}
+
+	// base "main"
+	if strings.HasPrefix(trimmed, "base ") {
+		cfg.Base = unquote(strings.TrimPrefix(trimmed, "base "))
+		return true
+	}
+
+	// auto_commit true
+	if strings.HasPrefix(trimmed, "auto_commit ") {
+		cfg.AutoCommit = strings.TrimSpace(strings.TrimPrefix(trimmed, "auto_commit ")) == "true"
+		return true
+	}
+
+	// auto_rebase true
+	if strings.HasPrefix(trimmed, "auto_rebase ") {
+		cfg.AutoRebase = strings.TrimSpace(strings.TrimPrefix(trimmed, "auto_rebase ")) == "true"
+		return true
+	}
+
+	// commit_prefix "converge"
+	if strings.HasPrefix(trimmed, "commit_prefix ") {
+		cfg.CommitPrefix = unquote(strings.TrimPrefix(trimmed, "commit_prefix "))
+		return true
+	}
+
+	return false
+}
+
 // parseContextBlock parses the body of context(...)
 func parseContextBlock(block string, cfg *Config) {
 	lines := strings.Split(block, "\n")
@@ -176,30 +254,8 @@ func parseContextBlock(block string, cfg *Config) {
 			continue
 		}
 
-		// sandbox "dir/"
-		if strings.HasPrefix(trimmed, "sandbox ") {
-			cfg.Sandbox = unquote(strings.TrimPrefix(trimmed, "sandbox "))
-			continue
-		}
-
-		// reasoner claude
-		// reasoner ollama "llama3:8b"
-		if strings.HasPrefix(trimmed, "reasoner ") {
-			parts := splitArgs(strings.TrimPrefix(trimmed, "reasoner "))
-			if len(parts) >= 1 {
-				cfg.Reasoner = parts[0]
-			}
-			if len(parts) >= 2 {
-				cfg.ReasonerModel = unquote(parts[1])
-			}
-			continue
-		}
-
-		// history 3
-		if strings.HasPrefix(trimmed, "history ") {
-			if n, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(trimmed, "history "))); err == nil {
-				cfg.HistoryCount = n
-			}
+		// Try top-level config (backward compat — these can be in context too)
+		if parseTopLevelConfig(trimmed, cfg) {
 			continue
 		}
 

@@ -730,6 +730,21 @@ func (r *Runtime) executeConverge(ctx context.Context, name, encodedBody, input 
 	fmt.Println()
 	fmt.Printf("   Retries:  %d (delay %ds)\n", cfg.MaxRetries, cfg.RetryDelay)
 	fmt.Printf("   Mode:     %s\n", cfg.Mode)
+	if cfg.PatchMode {
+		fmt.Println("   Git:      patch mode")
+		if cfg.Branch != "" {
+			fmt.Printf("   Branch:   %s\n", cfg.Branch)
+		}
+		if cfg.Base != "" {
+			fmt.Printf("   Base:     %s\n", cfg.Base)
+		}
+		if cfg.AutoCommit {
+			fmt.Printf("   Commit:   auto (%s)\n", cfg.CommitPrefix)
+		}
+		if cfg.AutoRebase {
+			fmt.Println("   Rebase:   auto")
+		}
+	}
 	fmt.Printf("   Intents:  %d\n", len(cfg.Intents))
 	fmt.Printf("   Checks:   %d\n", len(cfg.ValidateCmds))
 
