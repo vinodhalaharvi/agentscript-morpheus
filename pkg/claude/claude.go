@@ -69,7 +69,7 @@ No markdown code fences, no explanation, just the raw HTML.`, title, content)
 
 	reqBody := map[string]interface{}{
 		"model":      c.model,
-		"max_tokens": 8192,
+		"max_tokens": 16384,
 		"messages": []claudeMessage{
 			{Role: "user", Content: prompt},
 		},
@@ -189,7 +189,7 @@ func (s *Session) Chat(ctx context.Context, prompt string) (string, error) {
 
 	reqBody := map[string]interface{}{
 		"model":      s.client.model,
-		"max_tokens": 8192,
+		"max_tokens": 16384,
 		"messages":   s.messages,
 	}
 

@@ -2,6 +2,7 @@ package intent
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -389,7 +390,14 @@ func (e *Engine) buildPrompt(attempt int, contextOutput string, results []Valida
 			}
 		}
 
-		sb.WriteString("\nFix the remaining failures. Same response format as before.\n")
+		sb.WriteString("\nFix the remaining failures. Respond with ONLY JSON, no prose:\n")
+		sb.WriteString("```json\n")
+		if e.config.PatchMode {
+			sb.WriteString("{\"patches\": [{\"file\": \"path\", \"diff\": \"--- a/...\\n+++ b/...\"}], \"files\": {}, \"commands\": []}\n")
+		} else {
+			sb.WriteString("{\"files\": {\"path/to/file.go\": \"content...\"}, \"commands\": [\"go mod tidy\"]}\n")
+		}
+		sb.WriteString("```\n")
 		return sb.String()
 	}
 
@@ -434,13 +442,41 @@ func (e *Engine) buildPrompt(attempt int, contextOutput string, results []Valida
 		}
 	}
 
-	sb.WriteString("\n## RESPONSE FORMAT\n")
-	sb.WriteString("Respond with ONLY a JSON object with two keys: \"files\" and \"commands\".\n")
-	sb.WriteString("\"files\" is an object where keys are file paths and values are COMPLETE file contents.\n")
-	sb.WriteString("\"commands\" is an array of shell commands to run AFTER files are written (e.g. go mod tidy, buf generate).\n")
-	sb.WriteString("```json\n{\n  \"files\": {\n    \"go.mod\": \"module myapp\\n...\",\n    \"cmd/main.go\": \"package main\\n...\"\n  },\n  \"commands\": [\n    \"go mod tidy\",\n    \"buf generate\"\n  ]\n}\n```\n")
-	sb.WriteString("Only include files that need to be created or modified. Do NOT include go.sum — use 'go mod tidy' in commands instead.\n")
-	sb.WriteString("Commands run inside the sandbox directory. Use commands for things that cannot be expressed as file contents.\n")
+	sb.WriteString("\n## RESPONSE FORMAT — CRITICAL\n")
+	sb.WriteString("You MUST respond with ONLY a JSON object. No explanation. No analysis. No markdown outside the JSON. JUST JSON.\n\n")
+
+	if e.config.PatchMode && len(e.history) > 0 {
+		// Patch mode (loop 2+): return unified diffs for existing files, full content for new files
+		sb.WriteString("Return a JSON object with three keys: \"patches\", \"files\", and \"commands\".\n")
+		sb.WriteString("\"patches\": array of objects with \"file\" (path) and \"diff\" (unified diff format).\n")
+		sb.WriteString("\"files\": object for NEW files only (key=path, value=full content). Do NOT use this for existing files.\n")
+		sb.WriteString("\"commands\": array of shell commands to run after changes are applied.\n")
+		sb.WriteString("```json\n")
+		sb.WriteString("{\n")
+		sb.WriteString("  \"patches\": [\n")
+		sb.WriteString("    {\n")
+		sb.WriteString("      \"file\": \"internal/server/user.go\",\n")
+		sb.WriteString("      \"diff\": \"--- a/internal/server/user.go\\n+++ b/internal/server/user.go\\n@@ -10,3 +10,5 @@\\n func foo() {\\n-    old line\\n+    new line\\n+    added line\\n }\\n\"\n")
+		sb.WriteString("    }\n")
+		sb.WriteString("  ],\n")
+		sb.WriteString("  \"files\": {\n")
+		sb.WriteString("    \"internal/server/new_file.go\": \"package server\\n...\"\n")
+		sb.WriteString("  },\n")
+		sb.WriteString("  \"commands\": [\"go mod tidy\"]\n")
+		sb.WriteString("}\n```\n")
+		sb.WriteString("Use \"patches\" for modifying existing files. Use \"files\" only for brand new files.\n")
+		sb.WriteString("Diffs must be valid unified diff format that git apply can process.\n")
+	} else {
+		// Scaffold mode or first attempt: return full file contents
+		sb.WriteString("Return a JSON object with two keys: \"files\" and \"commands\".\n")
+		sb.WriteString("\"files\": object where keys are file paths, values are COMPLETE file contents.\n")
+		sb.WriteString("\"commands\": array of shell commands to run AFTER files are written.\n")
+		sb.WriteString("If you have nothing to change, respond with: {\"files\": {}, \"commands\": []}\n")
+		sb.WriteString("```json\n{\n  \"files\": {\n    \"path/to/file.go\": \"package main\\n...\"\n  },\n  \"commands\": [\"go mod tidy\"]\n}\n```\n")
+	}
+
+	sb.WriteString("IMPORTANT: Do NOT include any text before or after the JSON. No analysis. ONLY JSON.\n")
+	sb.WriteString("Do NOT include go.sum in files — use 'go mod tidy' in commands.\n")
 
 	if e.config.PatchMode {
 		sb.WriteString("\n## GIT CONTEXT\n")
@@ -462,7 +498,7 @@ func (e *Engine) buildPrompt(attempt int, contextOutput string, results []Valida
 
 // propose shows the plan and waits for human approval
 func (e *Engine) propose(attempt int, proposal string) bool {
-	files, commands := ParseProposal(proposal)
+	prop := ParseProposalFull(proposal)
 
 	fmt.Printf("\n┌──────────────────────────────────────────────────┐\n")
 	fmt.Printf("│  PROPOSED FIX (attempt %d/%d)                       \n", attempt, e.config.MaxRetries)
@@ -470,16 +506,23 @@ func (e *Engine) propose(attempt int, proposal string) bool {
 		fmt.Printf("│  branch: %-40s\n", e.config.Branch)
 	}
 	fmt.Printf("│                                                  │\n")
-	if len(files) > 0 {
-		for path, content := range files {
+	if len(prop.Patches) > 0 {
+		for _, p := range prop.Patches {
+			adds := strings.Count(p.Diff, "\n+")
+			dels := strings.Count(p.Diff, "\n-")
+			fmt.Printf("│  📝 %-35s (+%d, -%d)\n", p.File, adds, dels)
+		}
+	}
+	if len(prop.Files) > 0 {
+		for path, content := range prop.Files {
 			lines := strings.Count(content, "\n") + 1
 			fmt.Printf("│  📄 %-35s (%d lines)\n", path, lines)
 		}
 	}
-	if len(commands) > 0 {
+	if len(prop.Commands) > 0 {
 		fmt.Printf("│                                                  │\n")
 		fmt.Printf("│  🔧 Commands:                                    │\n")
-		for i, cmd := range commands {
+		for i, cmd := range prop.Commands {
 			fmt.Printf("│     %d. %-42s\n", i+1, cmd)
 		}
 	}
@@ -487,17 +530,46 @@ func (e *Engine) propose(attempt int, proposal string) bool {
 		fmt.Printf("│                                                  │\n")
 		fmt.Printf("│  📦 Will auto-commit after apply                 │\n")
 	}
-	if len(files) == 0 && len(commands) == 0 {
+	if len(prop.Files) == 0 && len(prop.Commands) == 0 && len(prop.Patches) == 0 {
+		fmt.Printf("│                                                  │\n")
+		fmt.Printf("│  ⚠️  Could not parse JSON from AI response        │\n")
+		fmt.Printf("│                                                  │\n")
+		fmt.Printf("└──────────────────────────────────────────────────┘\n")
+		// Show what Claude actually returned
+		fmt.Println("\n--- AI Response (raw) ---")
 		lines := strings.Split(proposal, "\n")
 		for i, l := range lines {
-			if i >= 8 {
-				fmt.Printf("│  ... (%d more lines)\n", len(lines)-8)
+			if i >= 20 {
+				fmt.Printf("... (%d more lines, use [v]iew to see all)\n", len(lines)-20)
 				break
 			}
-			if len(l) > 55 {
-				l = l[:55] + "..."
+			fmt.Println(l)
+		}
+		fmt.Println("--- End ---")
+		fmt.Print("\n[v]iew full | [s]kip | [n] abort > ")
+
+		reader := bufio.NewReader(os.Stdin)
+		for {
+			input, _ := reader.ReadString('\n')
+			input = strings.TrimSpace(strings.ToLower(input))
+			if input == "" {
+				continue
 			}
-			fmt.Printf("│  %s\n", l)
+			switch input {
+			case "v", "view":
+				fmt.Println("\n--- Full Response ---")
+				fmt.Println(proposal)
+				fmt.Println("--- End ---")
+				fmt.Print("\n[s]kip | [n] abort > ")
+			case "s", "skip":
+				return false
+			case "n", "no":
+				fmt.Println("❌ Aborted.")
+				os.Exit(0)
+				return false
+			default:
+				fmt.Print("[v/s/n] > ")
+			}
 		}
 	}
 	fmt.Printf("│                                                  │\n")
@@ -525,8 +597,14 @@ func (e *Engine) propose(attempt int, proposal string) bool {
 			fmt.Println("--- End ---\n")
 			fmt.Print("[y/n/d/s] > ")
 		case "d", "diff":
-			for path, content := range files {
-				fmt.Printf("\n--- %s ---\n", path)
+			// Show patches
+			for _, p := range prop.Patches {
+				fmt.Printf("\n--- %s (patch) ---\n", p.File)
+				fmt.Println(p.Diff)
+			}
+			// Show new files
+			for path, content := range prop.Files {
+				fmt.Printf("\n--- %s (new file) ---\n", path)
 				lines := strings.Split(content, "\n")
 				for i, l := range lines {
 					if i >= 30 {
@@ -547,14 +625,49 @@ func (e *Engine) propose(attempt int, proposal string) bool {
 	}
 }
 
-// applyProposal writes files and runs commands, returns any command errors
+// applyProposal writes files, applies patches, and runs commands
 func (e *Engine) applyProposal(proposal string) []string {
-	files, commands := ParseProposal(proposal)
+	prop := ParseProposalFull(proposal)
 	var errors []string
 
-	// Write files
-	if len(files) > 0 {
-		for path, content := range files {
+	// Apply patches via git apply
+	if len(prop.Patches) > 0 {
+		for _, p := range prop.Patches {
+			if !e.sandbox.IsSafe(p.File) {
+				fmt.Printf("🚫 Sandbox violation: %s — skipped\n", p.File)
+				continue
+			}
+			// Write patch to temp file and apply
+			patchPath := filepath.Join(e.sandbox.Root, ".converge-patch.tmp")
+			if err := os.WriteFile(patchPath, []byte(p.Diff), 0644); err != nil {
+				errMsg := fmt.Sprintf("failed to write patch for %s: %v", p.File, err)
+				fmt.Printf("❌ %s\n", errMsg)
+				errors = append(errors, errMsg)
+				continue
+			}
+			out, exitCode := e.sandbox.Exec("git apply .converge-patch.tmp 2>&1")
+			os.Remove(patchPath)
+			if exitCode != 0 {
+				// Fallback: try with --3way
+				os.WriteFile(patchPath, []byte(p.Diff), 0644)
+				out, exitCode = e.sandbox.Exec("git apply --3way .converge-patch.tmp 2>&1")
+				os.Remove(patchPath)
+			}
+			if exitCode != 0 {
+				errMsg := fmt.Sprintf("patch failed for %s: %s", p.File, strings.TrimSpace(out))
+				fmt.Printf("  ❌ patch %s: %s\n", p.File, strings.TrimSpace(firstLines(out, 2)))
+				errors = append(errors, errMsg)
+			} else {
+				adds := strings.Count(p.Diff, "\n+")
+				dels := strings.Count(p.Diff, "\n-")
+				fmt.Printf("  📝 %s (+%d, -%d)\n", p.File, adds, dels)
+			}
+		}
+	}
+
+	// Write new/full files
+	if len(prop.Files) > 0 {
+		for path, content := range prop.Files {
 			if !e.sandbox.IsSafe(path) {
 				fmt.Printf("🚫 Sandbox violation: %s — skipped\n", path)
 				continue
@@ -569,9 +682,9 @@ func (e *Engine) applyProposal(proposal string) []string {
 	}
 
 	// Run commands
-	if len(commands) > 0 {
+	if len(prop.Commands) > 0 {
 		fmt.Println()
-		for _, cmd := range commands {
+		for _, cmd := range prop.Commands {
 			fmt.Printf("  🔧 Running: %s\n", cmd)
 			out, exitCode := e.sandbox.Exec(cmd)
 			if exitCode != 0 {
@@ -584,8 +697,8 @@ func (e *Engine) applyProposal(proposal string) []string {
 		}
 	}
 
-	if len(files) == 0 && len(commands) == 0 {
-		fmt.Println("⚠️  No files or commands found in proposal.")
+	if len(prop.Files) == 0 && len(prop.Commands) == 0 && len(prop.Patches) == 0 {
+		fmt.Println("⚠️  No files, patches, or commands found in proposal.")
 	}
 
 	return errors
@@ -708,11 +821,25 @@ func (e *Engine) gitCommit(attempt int) {
 	}
 }
 
-// ParseProposal extracts files and commands from an AI response.
-// Supports two formats:
-//   1. New: {"files": {path: content}, "commands": ["cmd1", "cmd2"]}
-//   2. Legacy: {path: content} (no commands)
-func ParseProposal(response string) (map[string]string, []string) {
+// Patch represents a unified diff for an existing file
+type Patch struct {
+	File string
+	Diff string
+}
+
+// Proposal holds parsed AI response — files, patches, and commands
+type Proposal struct {
+	Files    map[string]string // new or full replacement files
+	Patches  []Patch           // unified diffs for existing files
+	Commands []string          // shell commands to run after apply
+}
+
+// ParseProposal extracts files, patches, and commands from an AI response.
+// Supports formats:
+//  1. Patch: {"patches": [...], "files": {...}, "commands": [...]}
+//  2. Full:  {"files": {path: content}, "commands": ["cmd1"]}
+//  3. Legacy: {path: content}
+func ParseProposalFull(response string) *Proposal {
 	response = strings.TrimSpace(response)
 
 	// Strip markdown fences
@@ -739,17 +866,232 @@ func ParseProposal(response string) (map[string]string, []string) {
 		response = response[:idx+1]
 	}
 
-	// Try to detect new format: look for "files" and "commands" keys
+	prop := &Proposal{
+		Files: make(map[string]string),
+	}
+
+	// Try standard JSON unmarshal first — handles all escaping correctly
+	var structured struct {
+		Files    map[string]string `json:"files"`
+		Patches  []struct {
+			File string `json:"file"`
+			Diff string `json:"diff"`
+		} `json:"patches"`
+		Commands []string `json:"commands"`
+	}
+
+	if err := json.Unmarshal([]byte(response), &structured); err == nil {
+		prop.Files = structured.Files
+		if prop.Files == nil {
+			prop.Files = make(map[string]string)
+		}
+		for _, p := range structured.Patches {
+			if p.File != "" && p.Diff != "" {
+				prop.Patches = append(prop.Patches, Patch{File: p.File, Diff: p.Diff})
+			}
+		}
+		prop.Commands = structured.Commands
+		return prop
+	}
+
+	// Fallback: try legacy flat format {path: content}
+	var flat map[string]string
+	if err := json.Unmarshal([]byte(response), &flat); err == nil {
+		prop.Files = flat
+		return prop
+	}
+
+	// Last resort: custom parser for malformed JSON
 	if strings.Contains(response, `"files"`) {
 		files, commands := parseNewFormat(response)
-		if len(files) > 0 || len(commands) > 0 {
-			return files, commands
+		prop.Files = files
+		prop.Commands = commands
+	} else {
+		prop.Files = ParseFiles(response)
+	}
+
+	return prop
+}
+
+// parsePatchesArray extracts patches from "patches": [{"file": "...", "diff": "..."}]
+func parsePatchesArray(response string) []Patch {
+	var patches []Patch
+
+	patchesIdx := strings.Index(response, `"patches"`)
+	if patchesIdx < 0 {
+		return nil
+	}
+
+	rest := response[patchesIdx+9:]
+	colonIdx := strings.Index(rest, ":")
+	if colonIdx < 0 {
+		return nil
+	}
+	rest = rest[colonIdx+1:]
+
+	bracketStart := strings.Index(rest, "[")
+	if bracketStart < 0 {
+		return nil
+	}
+
+	// Find matching ]
+	depth := 0
+	inStr := false
+	esc := false
+	end := -1
+	for i := bracketStart; i < len(rest); i++ {
+		c := rest[i]
+		if esc {
+			esc = false
+			continue
+		}
+		if c == '\\' && inStr {
+			esc = true
+			continue
+		}
+		if c == '"' {
+			inStr = !inStr
+		}
+		if !inStr {
+			if c == '[' {
+				depth++
+			} else if c == ']' {
+				depth--
+				if depth == 0 {
+					end = i
+					break
+				}
+			}
 		}
 	}
 
-	// Fall back to legacy format: {path: content}
-	files := ParseFiles(response)
-	return files, nil
+	if end < 0 {
+		return nil
+	}
+
+	arrStr := rest[bracketStart+1 : end]
+
+	// Extract each {file, diff} object
+	for {
+		objStart := strings.Index(arrStr, "{")
+		if objStart < 0 {
+			break
+		}
+
+		// Find matching }
+		objDepth := 0
+		objInStr := false
+		objEsc := false
+		objEnd := -1
+		for i := objStart; i < len(arrStr); i++ {
+			c := arrStr[i]
+			if objEsc {
+				objEsc = false
+				continue
+			}
+			if c == '\\' && objInStr {
+				objEsc = true
+				continue
+			}
+			if c == '"' {
+				objInStr = !objInStr
+			}
+			if !objInStr {
+				if c == '{' {
+					objDepth++
+				} else if c == '}' {
+					objDepth--
+					if objDepth == 0 {
+						objEnd = i
+						break
+					}
+				}
+			}
+		}
+
+		if objEnd < 0 {
+			break
+		}
+
+		objStr := arrStr[objStart : objEnd+1]
+		arrStr = arrStr[objEnd+1:]
+
+		// Extract "file" and "diff" from the object
+		file := extractJSONString(objStr, "file")
+		diff := extractJSONString(objStr, "diff")
+
+		if file != "" && diff != "" {
+			// Unescape the diff
+			diff = strings.ReplaceAll(diff, `\n`, "\n")
+			diff = strings.ReplaceAll(diff, `\t`, "\t")
+			diff = strings.ReplaceAll(diff, `\"`, `"`)
+			diff = strings.ReplaceAll(diff, `\\`, `\`)
+			patches = append(patches, Patch{File: file, Diff: diff})
+		}
+	}
+
+	return patches
+}
+
+// extractJSONString pulls a string value for a given key from a JSON-like string
+func extractJSONString(obj, key string) string {
+	search := `"` + key + `"`
+	idx := strings.Index(obj, search)
+	if idx < 0 {
+		return ""
+	}
+	rest := obj[idx+len(search):]
+	colonIdx := strings.Index(rest, ":")
+	if colonIdx < 0 {
+		return ""
+	}
+	rest = rest[colonIdx+1:]
+
+	// Find opening quote
+	quoteStart := strings.Index(rest, `"`)
+	if quoteStart < 0 {
+		return ""
+	}
+	rest = rest[quoteStart+1:]
+
+	// Find closing quote (respecting escapes)
+	var result strings.Builder
+	esc := false
+	for i := 0; i < len(rest); i++ {
+		c := rest[i]
+		if esc {
+			switch c {
+			case 'n':
+				result.WriteByte('\n')
+			case 't':
+				result.WriteByte('\t')
+			case '"':
+				result.WriteByte('"')
+			case '\\':
+				result.WriteByte('\\')
+			default:
+				result.WriteByte('\\')
+				result.WriteByte(c)
+			}
+			esc = false
+			continue
+		}
+		if c == '\\' {
+			esc = true
+			continue
+		}
+		if c == '"' {
+			return result.String()
+		}
+		result.WriteByte(c)
+	}
+	return result.String()
+}
+
+// ParseProposal extracts files and commands (backward compatible wrapper)
+func ParseProposal(response string) (map[string]string, []string) {
+	prop := ParseProposalFull(response)
+	return prop.Files, prop.Commands
 }
 
 // parseNewFormat extracts from {"files": {...}, "commands": [...]}
