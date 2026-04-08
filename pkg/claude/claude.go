@@ -19,7 +19,7 @@ type ClaudeClient struct {
 
 // NewClaudeClient creates a new Claude API client
 func NewClaudeClient(apiKey string) *ClaudeClient {
-	model := "claude-sonnet-4-20250514"
+	model := "claude-opus-4-20250514"
 	return &ClaudeClient{
 		apiKey:     apiKey,
 		model:      model,
@@ -69,7 +69,7 @@ No markdown code fences, no explanation, just the raw HTML.`, title, content)
 
 	reqBody := map[string]interface{}{
 		"model":      c.model,
-		"max_tokens": 16384,
+		"max_tokens": 32000,
 		"messages": []claudeMessage{
 			{Role: "user", Content: prompt},
 		},
@@ -154,7 +154,7 @@ No markdown code fences, no explanation, just the raw HTML.`, title, content)
 func (c *ClaudeClient) Chat(ctx context.Context, prompt string) (string, error) {
 	reqBody := map[string]interface{}{
 		"model":      c.model,
-		"max_tokens": 4096,
+		"max_tokens": 32000,
 		"messages": []claudeMessage{
 			{Role: "user", Content: prompt},
 		},
@@ -164,13 +164,13 @@ func (c *ClaudeClient) Chat(ctx context.Context, prompt string) (string, error) 
 
 // Session maintains a multi-turn conversation with Claude
 type Session struct {
-	client        *ClaudeClient
-	messages      []claudeMessage
-	TotalInput    int // cumulative input tokens
-	TotalOutput   int // cumulative output tokens
-	CallCount     int // number of API calls
-	LastInput     int // last call input tokens
-	LastOutput    int // last call output tokens
+	client      *ClaudeClient
+	messages    []claudeMessage
+	TotalInput  int // cumulative input tokens
+	TotalOutput int // cumulative output tokens
+	CallCount   int // number of API calls
+	LastInput   int // last call input tokens
+	LastOutput  int // last call output tokens
 }
 
 // NewSession creates a new conversational session
@@ -189,7 +189,7 @@ func (s *Session) Chat(ctx context.Context, prompt string) (string, error) {
 
 	reqBody := map[string]interface{}{
 		"model":      s.client.model,
-		"max_tokens": 16384,
+		"max_tokens": 32000,
 		"messages":   s.messages,
 	}
 
