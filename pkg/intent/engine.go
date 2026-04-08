@@ -15,6 +15,7 @@ type Config struct {
 	Sandbox       string
 	Reasoner      string // "claude" or "ollama"
 	ReasonerModel string // model name for ollama
+	UseSession    bool   // true = multi-turn conversation, false = single-shot
 	MaxRetries    int
 	RetryDelay    int // seconds
 	Mode          string // "propose" or "auto"
@@ -139,13 +140,17 @@ func (s *Sandbox) WriteFile(path, content string) error {
 	return os.WriteFile(abs, []byte(content), 0644)
 }
 
+// TokenReportFunc is called after each AI call with usage info
+type TokenReportFunc func()
+
 // Engine runs the intent reconciliation loop
 type Engine struct {
-	config   Config
-	sandbox  *Sandbox
-	history  []HistoryEntry
-	reasoner ReasonerFunc
-	runDSL   RunDSLFunc
+	config      Config
+	sandbox     *Sandbox
+	history     []HistoryEntry
+	reasoner    ReasonerFunc
+	runDSL      RunDSLFunc
+	tokenReport TokenReportFunc
 }
 
 // NewEngine creates a new intent engine
@@ -173,6 +178,11 @@ func NewEngine(cfg Config, reasoner ReasonerFunc, runDSL RunDSLFunc) (*Engine, e
 		reasoner: reasoner,
 		runDSL:   runDSL,
 	}, nil
+}
+
+// SetTokenReporter sets a function to call after each AI call for token reporting
+func (e *Engine) SetTokenReporter(fn TokenReportFunc) {
+	e.tokenReport = fn
 }
 
 // Run executes the reconciliation loop
@@ -234,6 +244,9 @@ func (e *Engine) Run() error {
 		prompt := e.buildPrompt(attempt, contextOutput, results)
 		fmt.Println("\n🧠 Asking AI for a fix...")
 		proposal, err := e.reasoner(prompt)
+		if e.tokenReport != nil {
+			e.tokenReport()
+		}
 		if err != nil {
 			fmt.Printf("❌ Reasoner error: %v\n", err)
 			continue
@@ -337,6 +350,50 @@ func (e *Engine) runValidations() ([]ValidateResult, bool) {
 func (e *Engine) buildPrompt(attempt int, contextOutput string, results []ValidateResult) string {
 	var sb strings.Builder
 
+	isFollowUp := e.config.UseSession && len(e.history) > 0
+
+	if isFollowUp {
+		// Session mode, loop 2+: Claude remembers everything, just send what changed
+		sb.WriteString(fmt.Sprintf("## ATTEMPT %d/%d — FOLLOW UP\n\n", attempt, e.config.MaxRetries))
+
+		// Only send validation results and errors
+		sb.WriteString("## VALIDATION RESULTS AFTER YOUR LAST FIX\n")
+		for _, r := range results {
+			status := "PASS"
+			if !r.Passed {
+				status = "FAIL"
+			}
+			sb.WriteString(fmt.Sprintf("[%s] %s\n", status, r.Command))
+			if !r.Passed && r.Output != "" {
+				sb.WriteString(fmt.Sprintf("```\n%s```\n", r.Output))
+			}
+		}
+
+		// Send command errors from last apply if any
+		if len(e.history) > 0 {
+			last := e.history[len(e.history)-1]
+			if len(last.ApplyErrors) > 0 {
+				sb.WriteString("\n## COMMAND ERRORS FROM YOUR LAST PROPOSAL\n")
+				for _, err := range last.ApplyErrors {
+					sb.WriteString(fmt.Sprintf("- %s\n", err))
+				}
+			}
+		}
+
+		// Send git diff if auto-commit is on
+		if e.config.AutoCommit {
+			sb.WriteString("\n## GIT DIFF (what changed from your last fix)\n")
+			diff, _ := e.sandbox.Exec("git diff HEAD~1 2>/dev/null")
+			if strings.TrimSpace(diff) != "" {
+				sb.WriteString(diff)
+			}
+		}
+
+		sb.WriteString("\nFix the remaining failures. Same response format as before.\n")
+		return sb.String()
+	}
+
+	// First attempt (or single-shot mode): send everything
 	sb.WriteString("You are an expert Go engineer. You are building a project inside a sandboxed directory.\n\n")
 
 	sb.WriteString("## INTENT (desired end state)\n")
@@ -359,8 +416,8 @@ func (e *Engine) buildPrompt(attempt int, contextOutput string, results []Valida
 	sb.WriteString("\n## CURRENT PROJECT STATE\n")
 	sb.WriteString(contextOutput)
 
-	// History
-	if len(e.history) > 0 {
+	// History (only for single-shot mode — session mode doesn't need it)
+	if !e.config.UseSession && len(e.history) > 0 {
 		start := len(e.history) - e.config.HistoryCount
 		if start < 0 {
 			start = 0

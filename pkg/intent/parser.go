@@ -190,6 +190,21 @@ func parseTopLevelConfig(trimmed string, cfg *Config) bool {
 		if len(parts) >= 2 {
 			cfg.ReasonerModel = unquote(parts[1])
 		}
+		cfg.UseSession = false
+		return true
+	}
+
+	// session claude — multi-turn conversation (Claude remembers previous loops)
+	// session ollama "llama3:8b"
+	if strings.HasPrefix(trimmed, "session ") {
+		parts := splitArgs(strings.TrimPrefix(trimmed, "session "))
+		if len(parts) >= 1 {
+			cfg.Reasoner = parts[0]
+		}
+		if len(parts) >= 2 {
+			cfg.ReasonerModel = unquote(parts[1])
+		}
+		cfg.UseSession = true
 		return true
 	}
 

@@ -694,11 +694,18 @@ func (r *Runtime) executeConverge(ctx context.Context, name, encodedBody, input 
 		return "", fmt.Errorf("converge %q parse error: %w", name, err)
 	}
 
-	// Build reasoner function
-	reasonerFn := func(prompt string) (string, error) {
-		return r.RunDSL(ctx, fmt.Sprintf("claude %q", prompt))
-	}
-	if cfg.Reasoner == "ollama" {
+	// Build reasoner function (single-shot or session)
+	var reasonerFn intent.ReasonerFunc
+	var session *claude.Session
+
+	if cfg.UseSession && cfg.Reasoner == "claude" && r.claude != nil {
+		// Session mode — multi-turn conversation
+		session = r.claude.NewSession()
+		reasonerFn = func(prompt string) (string, error) {
+			return session.Chat(ctx, prompt)
+		}
+	} else if cfg.Reasoner == "ollama" {
+		// Ollama (single-shot only for now)
 		if cfg.ReasonerModel != "" {
 			reasonerFn = func(prompt string) (string, error) {
 				return r.RunDSL(ctx, fmt.Sprintf("ollama %q %q", prompt, cfg.ReasonerModel))
@@ -707,6 +714,11 @@ func (r *Runtime) executeConverge(ctx context.Context, name, encodedBody, input 
 			reasonerFn = func(prompt string) (string, error) {
 				return r.RunDSL(ctx, fmt.Sprintf("ollama %q", prompt))
 			}
+		}
+	} else {
+		// Claude single-shot (default)
+		reasonerFn = func(prompt string) (string, error) {
+			return r.RunDSL(ctx, fmt.Sprintf("claude %q", prompt))
 		}
 	}
 
@@ -721,9 +733,20 @@ func (r *Runtime) executeConverge(ctx context.Context, name, encodedBody, input 
 		return "", fmt.Errorf("converge %q engine error: %w", name, err)
 	}
 
+	// Wire token reporter if session mode
+	if session != nil {
+		engine.SetTokenReporter(func() {
+			fmt.Printf("   📊 Tokens: %s\n", session.TokenSummary())
+		})
+	}
+
 	fmt.Printf("\n🎯 Converge: %s\n", name)
 	fmt.Printf("   Sandbox:  %s\n", cfg.Sandbox)
-	fmt.Printf("   Reasoner: %s", cfg.Reasoner)
+	if cfg.UseSession {
+		fmt.Printf("   Session:  %s", cfg.Reasoner)
+	} else {
+		fmt.Printf("   Reasoner: %s", cfg.Reasoner)
+	}
 	if cfg.ReasonerModel != "" {
 		fmt.Printf(" (%s)", cfg.ReasonerModel)
 	}

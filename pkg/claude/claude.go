@@ -159,15 +159,95 @@ func (c *ClaudeClient) Chat(ctx context.Context, prompt string) (string, error) 
 			{Role: "user", Content: prompt},
 		},
 	}
+	return c.doRequest(ctx, reqBody)
+}
+
+// Session maintains a multi-turn conversation with Claude
+type Session struct {
+	client        *ClaudeClient
+	messages      []claudeMessage
+	TotalInput    int // cumulative input tokens
+	TotalOutput   int // cumulative output tokens
+	CallCount     int // number of API calls
+	LastInput     int // last call input tokens
+	LastOutput    int // last call output tokens
+}
+
+// NewSession creates a new conversational session
+func (c *ClaudeClient) NewSession() *Session {
+	return &Session{
+		client:   c,
+		messages: make([]claudeMessage, 0),
+	}
+}
+
+// Chat sends a message in the session and returns the response.
+// Maintains conversation history — Claude remembers previous turns.
+func (s *Session) Chat(ctx context.Context, prompt string) (string, error) {
+	// Add user message to history
+	s.messages = append(s.messages, claudeMessage{Role: "user", Content: prompt})
+
+	reqBody := map[string]interface{}{
+		"model":      s.client.model,
+		"max_tokens": 8192,
+		"messages":   s.messages,
+	}
+
+	response, usage, err := s.client.doRequestWithUsage(ctx, reqBody)
+	if err != nil {
+		// Remove the failed user message
+		s.messages = s.messages[:len(s.messages)-1]
+		return "", err
+	}
+
+	// Track tokens
+	s.CallCount++
+	if usage != nil {
+		s.LastInput = usage.InputTokens
+		s.LastOutput = usage.OutputTokens
+		s.TotalInput += usage.InputTokens
+		s.TotalOutput += usage.OutputTokens
+	}
+
+	// Add assistant response to history
+	s.messages = append(s.messages, claudeMessage{Role: "assistant", Content: response})
+
+	return response, nil
+}
+
+// MessageCount returns the number of messages in the session
+func (s *Session) MessageCount() int {
+	return len(s.messages)
+}
+
+// TokenSummary returns a formatted string of token usage
+func (s *Session) TokenSummary() string {
+	return fmt.Sprintf("call %d: %d in / %d out (total: %d in / %d out)",
+		s.CallCount, s.LastInput, s.LastOutput, s.TotalInput, s.TotalOutput)
+}
+
+// TokenUsage tracks tokens consumed per API call
+type TokenUsage struct {
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+}
+
+// doRequest makes the actual API call and returns response + token usage
+func (c *ClaudeClient) doRequest(ctx context.Context, reqBody map[string]interface{}) (string, error) {
+	text, _, err := c.doRequestWithUsage(ctx, reqBody)
+	return text, err
+}
+
+func (c *ClaudeClient) doRequestWithUsage(ctx context.Context, reqBody map[string]interface{}) (string, *TokenUsage, error) {
 
 	jsonBody, err := json.Marshal(reqBody)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal request: %w", err)
+		return "", nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", "https://api.anthropic.com/v1/messages", bytes.NewReader(jsonBody))
 	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
+		return "", nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
@@ -176,17 +256,17 @@ func (c *ClaudeClient) Chat(ctx context.Context, prompt string) (string, error) 
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("request failed: %w", err)
+		return "", nil, fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("failed to read response: %w", err)
+		return "", nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
 	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("Claude API error: status %d - %s", resp.StatusCode, string(body))
+		return "", nil, fmt.Errorf("Claude API error: status %d - %s", resp.StatusCode, string(body))
 	}
 
 	var claudeResp struct {
@@ -194,15 +274,16 @@ func (c *ClaudeClient) Chat(ctx context.Context, prompt string) (string, error) 
 			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"content"`
+		Usage *TokenUsage `json:"usage"`
 	}
 
 	if err := json.Unmarshal(body, &claudeResp); err != nil {
-		return "", fmt.Errorf("failed to parse response: %w", err)
+		return "", nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
 	if len(claudeResp.Content) == 0 {
-		return "", fmt.Errorf("no content in response")
+		return "", nil, fmt.Errorf("no content in response")
 	}
 
-	return claudeResp.Content[0].Text, nil
+	return claudeResp.Content[0].Text, claudeResp.Usage, nil
 }
