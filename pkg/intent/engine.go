@@ -146,12 +146,13 @@ type TokenReportFunc func()
 
 // Engine runs the intent reconciliation loop
 type Engine struct {
-	config      Config
-	sandbox     *Sandbox
-	history     []HistoryEntry
-	reasoner    ReasonerFunc
-	runDSL      RunDSLFunc
-	tokenReport TokenReportFunc
+	config         Config
+	sandbox        *Sandbox
+	history        []HistoryEntry
+	reasoner       ReasonerFunc
+	runDSL         RunDSLFunc
+	tokenReport    TokenReportFunc
+	diagnosticCmds []string // accumulated diagnostic commands from AI
 }
 
 // NewEngine creates a new intent engine
@@ -204,6 +205,8 @@ func (e *Engine) Run() error {
 		e.config.CommitPrefix = "converge"
 	}
 
+	var lastResults []ValidateResult
+
 	for attempt := 1; attempt <= e.config.MaxRetries; attempt++ {
 		fmt.Printf("\n🔄 ═══ Intent Loop — Attempt %d/%d ═══\n\n", attempt, e.config.MaxRetries)
 
@@ -212,9 +215,15 @@ func (e *Engine) Run() error {
 			e.gitRebase()
 		}
 
-		// 1. Collect context
+		// 1. Collect context + adaptive diagnostics from last failure
 		fmt.Println("📋 Collecting context...")
 		contextOutput := e.collectContext()
+		if len(lastResults) > 0 {
+			diag := e.collectDiagnostics(lastResults)
+			if diag != "" {
+				contextOutput += "\n" + diag
+			}
+		}
 
 		// 2. Run validations
 		fmt.Println("\n✔️  Running validations...")
@@ -280,6 +289,9 @@ func (e *Engine) Run() error {
 			ApplyErrors: applyErrors,
 		})
 
+		// Store results for adaptive diagnostics on next loop
+		lastResults = results
+
 		// 6. Wait before next loop
 		if attempt < e.config.MaxRetries {
 			fmt.Printf("\n⏳ Waiting %ds...\n", e.config.RetryDelay)
@@ -324,7 +336,190 @@ func (e *Engine) collectContext() string {
 		sb.WriteString(fmt.Sprintf("--- %s (exit %d) ---\n%s\n", cmd, exitCode, out))
 	}
 
+	// Run accumulated diagnostic commands from previous AI analysis
+	if len(e.diagnosticCmds) > 0 {
+		sb.WriteString("## DIAGNOSTIC CONTEXT (AI-discovered)\n")
+		for _, cmd := range e.diagnosticCmds {
+			out, _ := e.sandbox.Exec(cmd)
+			sb.WriteString(fmt.Sprintf("--- %s ---\n%s\n", cmd, out))
+		}
+	}
+
 	return sb.String()
+}
+
+// collectDiagnostics uses the AI to analyze validation failures and
+// determine what additional context is needed. The AI returns shell
+// commands to run, and the engine adds them to its accumulated list.
+// These commands persist across loops — the context grows smarter.
+func (e *Engine) collectDiagnostics(results []ValidateResult) string {
+	var sb strings.Builder
+	sb.WriteString("You are debugging a project. These validations failed:\n\n")
+	for _, r := range results {
+		if !r.Passed {
+			sb.WriteString(fmt.Sprintf("[FAIL] %s\n```\n%s\n```\n", r.Command, r.Output))
+		}
+	}
+
+	// Tell Claude what diagnostics we already have
+	if len(e.diagnosticCmds) > 0 {
+		sb.WriteString("\nI am already running these diagnostic commands:\n")
+		for _, cmd := range e.diagnosticCmds {
+			sb.WriteString(fmt.Sprintf("  - %s\n", cmd))
+		}
+		sb.WriteString("\nSuggest additional commands NOT already in the list above.\n")
+	}
+
+	sb.WriteString("\nWhat shell commands should I run to gather diagnostic context that will help fix these errors?\n")
+	sb.WriteString("Respond with ONLY a JSON array of shell commands. No explanation. Example:\n")
+	sb.WriteString("[\"cat go.mod\", \"find gen -type f\", \"head -30 cmd/server/main.go\"]\n")
+	sb.WriteString("Maximum 5 commands. Only read commands (cat, find, ls, head, grep). No modifications.\n")
+	sb.WriteString("Return empty array [] if no additional diagnostics needed.\n")
+
+	fmt.Println("🔍 Gathering adaptive diagnostics...")
+	response, err := e.reasoner(sb.String())
+	if e.tokenReport != nil {
+		e.tokenReport()
+	}
+	if err != nil {
+		return ""
+	}
+
+	commands := parseDiagnosticCommands(response)
+	if len(commands) == 0 {
+		return ""
+	}
+
+	// Filter safe commands and deduplicate
+	existing := make(map[string]bool)
+	for _, cmd := range e.diagnosticCmds {
+		existing[cmd] = true
+	}
+
+	var newCmds []string
+	for _, cmd := range commands {
+		if !isSafeReadCommand(cmd) {
+			fmt.Printf("   ⚠️  Skipped unsafe: %s\n", cmd)
+			continue
+		}
+		if existing[cmd] {
+			continue
+		}
+		newCmds = append(newCmds, cmd)
+	}
+
+	if len(newCmds) == 0 {
+		return ""
+	}
+
+	// Show proposed diagnostic commands and ask for approval
+	fmt.Printf("\n┌──────────────────────────────────────────────────┐\n")
+	fmt.Printf("│  🔍 AI wants to run diagnostic commands:          │\n")
+	fmt.Printf("│                                                  │\n")
+	for i, cmd := range newCmds {
+		fmt.Printf("│     %d. %-42s\n", i+1, cmd)
+	}
+	fmt.Printf("│                                                  │\n")
+	fmt.Printf("│  [y]es  [n]o                                     │\n")
+	fmt.Printf("└──────────────────────────────────────────────────┘\n")
+	fmt.Print("\n> ")
+
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(strings.ToLower(input))
+		if input == "" {
+			continue
+		}
+		if input == "y" || input == "yes" {
+			break
+		}
+		if input == "n" || input == "no" {
+			fmt.Println("⏭  Skipped diagnostics.")
+			return ""
+		}
+		fmt.Print("[y/n] > ")
+	}
+
+	// Approved — add to accumulated list and run
+	for _, cmd := range newCmds {
+		e.diagnosticCmds = append(e.diagnosticCmds, cmd)
+		fmt.Printf("   ➕ %s\n", cmd)
+	}
+	fmt.Printf("   📋 Total diagnostic commands: %d\n", len(e.diagnosticCmds))
+
+	// Run new commands for immediate use
+	var diag strings.Builder
+	diag.WriteString("## NEW DIAGNOSTIC CONTEXT\n")
+	for _, cmd := range newCmds {
+		out, _ := e.sandbox.Exec(cmd)
+		diag.WriteString(fmt.Sprintf("--- %s ---\n%s\n", cmd, out))
+	}
+
+	return diag.String()
+}
+
+// parseDiagnosticCommands extracts shell commands from AI response
+func parseDiagnosticCommands(response string) []string {
+	response = strings.TrimSpace(response)
+
+	if idx := strings.Index(response, "```"); idx >= 0 {
+		response = response[idx+3:]
+		if strings.HasPrefix(response, "json") {
+			response = response[4:]
+		}
+		if end := strings.Index(response, "```"); end >= 0 {
+			response = response[:end]
+		}
+	}
+
+	response = strings.TrimSpace(response)
+	if idx := strings.Index(response, "["); idx >= 0 {
+		response = response[idx:]
+	}
+	if idx := strings.LastIndex(response, "]"); idx >= 0 {
+		response = response[:idx+1]
+	}
+
+	var commands []string
+	if err := json.Unmarshal([]byte(response), &commands); err != nil {
+		return nil
+	}
+
+	if len(commands) > 5 {
+		commands = commands[:5]
+	}
+	return commands
+}
+
+// isSafeReadCommand checks that a command only reads, never modifies
+func isSafeReadCommand(cmd string) bool {
+	cmd = strings.TrimSpace(cmd)
+	parts := strings.Fields(cmd)
+	if len(parts) == 0 {
+		return false
+	}
+
+	safe := map[string]bool{
+		"cat": true, "head": true, "tail": true, "find": true,
+		"ls": true, "tree": true, "grep": true, "wc": true,
+		"file": true, "stat": true, "du": true, "diff": true,
+		"pureast": true, "gopls": true,
+	}
+
+	base := parts[0]
+	if safe[base] {
+		return true
+	}
+
+	if base == "go" && len(parts) >= 2 {
+		safeGo := map[string]bool{
+			"list": true, "doc": true, "env": true, "version": true,
+		}
+		return safeGo[parts[1]]
+	}
+
+	return false
 }
 
 // runValidations checks all validate commands
