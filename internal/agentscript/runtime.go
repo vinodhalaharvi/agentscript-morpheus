@@ -744,7 +744,9 @@ func (r *Runtime) executeConverge(ctx context.Context, name, encodedBody, input 
 	// Wire token reporter if session mode
 	if session != nil {
 		engine.SetTokenReporter(func() {
-			fmt.Printf("   📊 Tokens: %s\n", session.TokenSummary())
+			fmt.Printf("\n   ┌─────────────────────────────────────────────┐\n")
+			fmt.Printf("   │ 📊 %s │\n", session.TokenSummary())
+			fmt.Printf("   └─────────────────────────────────────────────┘\n")
 		})
 	}
 

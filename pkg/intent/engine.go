@@ -201,6 +201,18 @@ func (e *Engine) Run() error {
 	if e.config.PatchMode && e.config.Branch != "" {
 		e.gitSetup()
 	}
+
+	// Auto-init git repo if auto_commit is enabled
+	if e.config.AutoCommit {
+		gitDir := filepath.Join(e.sandbox.Root, ".git")
+		if _, err := os.Stat(gitDir); os.IsNotExist(err) {
+			fmt.Println("📦 Initializing git repo for auto-commit...")
+			e.sandbox.Exec("git init")
+			e.sandbox.Exec("git add -A")
+			e.sandbox.Exec("git commit -m 'initial state'")
+		}
+	}
+
 	if e.config.CommitPrefix == "" {
 		e.config.CommitPrefix = "converge"
 	}
@@ -307,15 +319,11 @@ func (e *Engine) Run() error {
 func (e *Engine) collectContext() string {
 	var sb strings.Builder
 
-	// Always include file listing
+	// Always include file listing (not contents — too expensive)
 	sb.WriteString("## FILES IN SANDBOX\n")
-	treeOut, _ := e.sandbox.Exec("find . -type f | head -100")
+	treeOut, _ := e.sandbox.Exec("find . -type f -not -path './.git/*' -not -path './gen/*' | sort | head -100")
 	sb.WriteString(treeOut)
 	sb.WriteString("\n")
-
-	// Read all file contents
-	sb.WriteString("## FILE CONTENTS\n")
-	sb.WriteString(e.sandbox.ReadAll())
 
 	// Run context DSL commands if any
 	if e.config.ContextDSL != "" {
