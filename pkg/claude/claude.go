@@ -164,13 +164,14 @@ func (c *ClaudeClient) Chat(ctx context.Context, prompt string) (string, error) 
 
 // Session maintains a multi-turn conversation with Claude
 type Session struct {
-	client      *ClaudeClient
-	messages    []claudeMessage
-	TotalInput  int // cumulative input tokens
-	TotalOutput int // cumulative output tokens
-	CallCount   int // number of API calls
-	LastInput   int // last call input tokens
-	LastOutput  int // last call output tokens
+	client       *ClaudeClient
+	messages     []claudeMessage
+	SystemPrompt string // persistent system prompt — never dropped
+	TotalInput   int    // cumulative input tokens
+	TotalOutput  int    // cumulative output tokens
+	CallCount    int    // number of API calls
+	LastInput    int    // last call input tokens
+	LastOutput   int    // last call output tokens
 }
 
 // NewSession creates a new conversational session
@@ -191,6 +192,11 @@ func (s *Session) Chat(ctx context.Context, prompt string) (string, error) {
 		"model":      s.client.model,
 		"max_tokens": 32000,
 		"messages":   s.messages,
+	}
+
+	// System prompt is always sent — never dropped from context
+	if s.SystemPrompt != "" {
+		reqBody["system"] = s.SystemPrompt
 	}
 
 	response, usage, err := s.client.doRequestWithUsage(ctx, reqBody)

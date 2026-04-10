@@ -701,6 +701,14 @@ func (r *Runtime) executeConverge(ctx context.Context, name, encodedBody, input 
 	if cfg.UseSession && cfg.Reasoner == "claude" && r.claude != nil {
 		// Session mode — multi-turn conversation
 		session = r.claude.NewSession()
+
+		// Auto-read .agentscript.md from sandbox as system prompt
+		agentscriptMD := filepath.Join(cfg.Sandbox, ".agentscript.md")
+		if data, err := os.ReadFile(agentscriptMD); err == nil {
+			session.SystemPrompt = string(data)
+			fmt.Printf("📌 Loaded .agentscript.md (%d bytes) as system prompt\n", len(data))
+		}
+
 		reasonerFn = func(prompt string) (string, error) {
 			return session.Chat(ctx, prompt)
 		}
