@@ -138,6 +138,14 @@ func NewRuntime(ctx context.Context, cfg RuntimeConfig) (*Runtime, error) {
 	return r, nil
 }
 
+// GetClaudeSession creates a new Claude session if claude client is available
+func (r *Runtime) GetClaudeSession() *claude.Session {
+	if r.claude == nil {
+		return nil
+	}
+	return r.claude.NewSession()
+}
+
 // RunDSL parses and executes a raw DSL string.
 // This is the Executor seam used by pkg/agent — lets the agent plugin
 // execute generated pipelines without importing internal/agentscript.

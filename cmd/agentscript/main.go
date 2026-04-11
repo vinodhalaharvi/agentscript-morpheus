@@ -6,9 +6,11 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/vinodhalaharvi/agentscript/internal/agentscript"
+	"github.com/vinodhalaharvi/agentscript/pkg/claude"
 	"github.com/vinodhalaharvi/agentscript/pkg/intent"
 )
 
@@ -309,17 +311,39 @@ func executeIntent(ctx context.Context, rt *agentscript.Runtime, content string)
 	}
 
 	// Build the reasoner function based on config
-	reasonerFn := func(prompt string) (string, error) {
-		return rt.RunDSL(ctx, fmt.Sprintf("claude %q", prompt))
-	}
-	if cfg.Reasoner == "ollama" {
-		if cfg.ReasonerModel != "" {
+	var reasonerFn intent.ReasonerFunc
+	var session *claude.Session
+
+	if cfg.UseSession && cfg.Reasoner == "claude" {
+		session = rt.GetClaudeSession()
+		if session != nil {
+			// Auto-read .agentscript.md from sandbox as system prompt
+			agentscriptMD := filepath.Join(cfg.Sandbox, ".agentscript.md")
+			if data, err := os.ReadFile(agentscriptMD); err == nil {
+				session.SystemPrompt = string(data)
+				fmt.Printf("📌 Loaded .agentscript.md (%d bytes) as system prompt\n", len(data))
+			}
+
 			reasonerFn = func(prompt string) (string, error) {
-				return rt.RunDSL(ctx, fmt.Sprintf("ollama %q %q", prompt, cfg.ReasonerModel))
+				return session.Chat(ctx, prompt)
+			}
+		}
+	}
+
+	if reasonerFn == nil {
+		if cfg.Reasoner == "ollama" {
+			if cfg.ReasonerModel != "" {
+				reasonerFn = func(prompt string) (string, error) {
+					return rt.RunDSL(ctx, fmt.Sprintf("ollama %q %q", prompt, cfg.ReasonerModel))
+				}
+			} else {
+				reasonerFn = func(prompt string) (string, error) {
+					return rt.RunDSL(ctx, fmt.Sprintf("ollama %q", prompt))
+				}
 			}
 		} else {
 			reasonerFn = func(prompt string) (string, error) {
-				return rt.RunDSL(ctx, fmt.Sprintf("ollama %q", prompt))
+				return rt.RunDSL(ctx, fmt.Sprintf("claude %q", prompt))
 			}
 		}
 	}
@@ -337,7 +361,11 @@ func executeIntent(ctx context.Context, rt *agentscript.Runtime, content string)
 
 	fmt.Println("🎯 AgentScript Intent Mode")
 	fmt.Printf("   Sandbox:  %s\n", cfg.Sandbox)
-	fmt.Printf("   Reasoner: %s", cfg.Reasoner)
+	if cfg.UseSession {
+		fmt.Printf("   Session:  %s", cfg.Reasoner)
+	} else {
+		fmt.Printf("   Reasoner: %s", cfg.Reasoner)
+	}
 	if cfg.ReasonerModel != "" {
 		fmt.Printf(" (%s)", cfg.ReasonerModel)
 	}
@@ -347,6 +375,15 @@ func executeIntent(ctx context.Context, rt *agentscript.Runtime, content string)
 	fmt.Printf("   Intents:  %d\n", len(cfg.Intents))
 	fmt.Printf("   Checks:   %d\n", len(cfg.ValidateCmds))
 	fmt.Println()
+
+	// Wire token reporter if session mode
+	if session != nil {
+		engine.SetTokenReporter(func() {
+			fmt.Printf("\n   ┌─────────────────────────────────────────────┐\n")
+			fmt.Printf("   │ 📊 %s │\n", session.TokenSummary())
+			fmt.Printf("   └─────────────────────────────────────────────┘\n")
+		})
+	}
 
 	if err := engine.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "\n%v\n", err)
