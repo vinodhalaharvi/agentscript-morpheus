@@ -316,21 +316,31 @@ func executeIntent(ctx context.Context, rt *agentscript.Runtime, content string)
 
 	if cfg.UseSession && cfg.Reasoner == "claude" {
 		session = rt.GetClaudeSession()
-		if session != nil {
-			// Auto-read .agentscript.md from sandbox as system prompt
-			agentscriptMD := filepath.Join(cfg.Sandbox, ".agentscript.md")
-			if data, err := os.ReadFile(agentscriptMD); err == nil {
-				session.SystemPrompt = string(data)
-				fmt.Printf("📌 Loaded .agentscript.md (%d bytes) as system prompt\n", len(data))
-			}
+		if session == nil {
+			fmt.Fprintf(os.Stderr, "⛔ FATAL: session claude requested but CLAUDE_API_KEY not set\n")
+			os.Exit(1)
+		}
+		fmt.Printf("✅ Session active: claude\n")
 
-			reasonerFn = func(prompt string) (string, error) {
-				return session.Chat(ctx, prompt)
-			}
+		// Auto-read .agentscript.md from sandbox as system prompt
+		agentscriptMD := filepath.Join(cfg.Sandbox, ".agentscript.md")
+		if data, err := os.ReadFile(agentscriptMD); err == nil {
+			session.SystemPrompt = string(data)
+			fmt.Printf("📌 Loaded .agentscript.md (%d bytes) as system prompt\n", len(data))
+		} else {
+			fmt.Printf("⚠️  No .agentscript.md found at %s (recommended for import rules)\n", agentscriptMD)
+		}
+
+		reasonerFn = func(prompt string) (string, error) {
+			return session.Chat(ctx, prompt)
 		}
 	}
 
 	if reasonerFn == nil {
+		if cfg.UseSession {
+			fmt.Fprintf(os.Stderr, "⛔ FATAL: session requested but could not create session\n")
+			os.Exit(1)
+		}
 		if cfg.Reasoner == "ollama" {
 			if cfg.ReasonerModel != "" {
 				reasonerFn = func(prompt string) (string, error) {
