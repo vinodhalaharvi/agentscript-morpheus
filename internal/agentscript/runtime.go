@@ -698,6 +698,7 @@ func (r *Runtime) executeConverge(ctx context.Context, name, encodedBody, input 
 	var reasonerFn intent.ReasonerFunc
 	var session *claude.Session
 
+	fmt.Printf("   DEBUG: UseSession=%v Reasoner=%q claude=%v\n", cfg.UseSession, cfg.Reasoner, r.claude != nil)
 	if cfg.UseSession && cfg.Reasoner == "claude" && r.claude != nil {
 		// Session mode — multi-turn conversation
 		session = r.claude.NewSession()
