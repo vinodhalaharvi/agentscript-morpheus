@@ -22,6 +22,7 @@ import (
 	aggithub "github.com/vinodhalaharvi/agentscript/pkg/github"
 	"github.com/vinodhalaharvi/agentscript/pkg/huggingface"
 	"github.com/vinodhalaharvi/agentscript/pkg/jobsearch"
+	"github.com/vinodhalaharvi/agentscript/pkg/kg"
 	"github.com/vinodhalaharvi/agentscript/pkg/mcp"
 	"github.com/vinodhalaharvi/agentscript/pkg/mcpagent"
 	"github.com/vinodhalaharvi/agentscript/pkg/mcpsearch"
@@ -34,6 +35,7 @@ import (
 	"github.com/vinodhalaharvi/agentscript/pkg/perplexity"
 	"github.com/vinodhalaharvi/agentscript/pkg/plugagent"
 	"github.com/vinodhalaharvi/agentscript/pkg/plugin"
+	"github.com/vinodhalaharvi/agentscript/pkg/rag"
 	"github.com/vinodhalaharvi/agentscript/pkg/reddit"
 	"github.com/vinodhalaharvi/agentscript/pkg/review"
 	"github.com/vinodhalaharvi/agentscript/pkg/rss"
@@ -111,6 +113,12 @@ func (r *Runtime) buildRegistry(c *cache.Cache) *plugin.Registry {
 
 	// --- DataTable — render .table DSL into self-contained HTML ---
 	reg.Register(datatable.NewPlugin(r.verbose))
+
+	// --- RAG — Postgres + LLM vector search pipeline ---
+	reg.Register(rag.NewPlugin())
+
+	// --- Knowledge Graph — Apache AGE + pgvector GraphRAG pipeline ---
+	reg.Register(kg.NewPlugin())
 
 	// --- AI Table Render — JSON in, interactive dashboard HTML out ---
 	var tableReasoner datatable.Reasoner
