@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,6 +30,7 @@ type Config struct {
 	GraphName   string // AGE graph name (default "knowledge")
 	TopK        int    // vector search results (default 5)
 	MaxHops     int    // max graph traversal depth (default 3)
+	EmbedDim    int    // embedding dimension (default 3584; override via KG_EMBED_DIM env)
 }
 
 // Client is the Knowledge Graph plugin client
@@ -54,6 +56,14 @@ func NewClient(cfg Config) *Client {
 	}
 	if cfg.EmbedModel == "" {
 		cfg.EmbedModel = cfg.LLMModel
+	}
+	if cfg.EmbedDim <= 0 {
+		cfg.EmbedDim = 3584 // llama.cpp + Qwen-7B embed typical; override via KG_EMBED_DIM
+		if v := os.Getenv("KG_EMBED_DIM"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				cfg.EmbedDim = n
+			}
+		}
 	}
 	return &Client{
 		cfg:        cfg,
@@ -97,40 +107,77 @@ func (c *Client) Connect(ctx context.Context) error {
 		}
 	}
 
-	// Create entity embeddings table for hybrid retrieval
-	c.db.ExecContext(ctx, `
+	// Create entity embeddings table for hybrid retrieval.
+	// Embedding column is vector(EmbedDim) so pgvector <=> operator works.
+	// If an older version created the column as 'text', detect and recreate.
+	var existingType string
+	c.db.QueryRowContext(ctx, `
+		SELECT data_type FROM information_schema.columns
+		WHERE table_name = 'kg_entity_embeddings' AND column_name = 'embedding'
+	`).Scan(&existingType)
+	if existingType != "" && existingType != "USER-DEFINED" {
+		// pgvector's vector type reports as USER-DEFINED. Anything else = wrong type.
+		fmt.Printf("   ⚠️  kg_entity_embeddings.embedding has type %q, recreating as vector(%d)\n",
+			existingType, c.cfg.EmbedDim)
+		if _, err := c.db.ExecContext(ctx, `DROP TABLE IF EXISTS kg_entity_embeddings CASCADE`); err != nil {
+			return fmt.Errorf("kg: failed to drop stale kg_entity_embeddings: %w", err)
+		}
+	}
+	if _, err := c.db.ExecContext(ctx, fmt.Sprintf(`
 		CREATE TABLE IF NOT EXISTS kg_entity_embeddings (
 			entity_name TEXT PRIMARY KEY,
 			entity_type TEXT,
-			embedding   text,
+			embedding   vector(%d),
 			properties  JSONB DEFAULT '{}',
 			created_at  TIMESTAMPTZ DEFAULT NOW()
 		)
-	`)
-	c.db.ExecContext(ctx, `
+	`, c.cfg.EmbedDim)); err != nil {
+		return fmt.Errorf("kg: failed to create kg_entity_embeddings: %w", err)
+	}
+	if _, err := c.db.ExecContext(ctx, `
 		CREATE INDEX IF NOT EXISTS kg_entity_embed_idx
 		ON kg_entity_embeddings USING hnsw (embedding vector_cosine_ops)
-	`)
+	`); err != nil {
+		return fmt.Errorf("kg: failed to create kg_entity_embed_idx: %w", err)
+	}
 
-	// Create text chunks table for supporting context
-	c.db.ExecContext(ctx, `
+	// Create text chunks table for supporting context.
+	existingType = ""
+	c.db.QueryRowContext(ctx, `
+		SELECT data_type FROM information_schema.columns
+		WHERE table_name = 'kg_chunks' AND column_name = 'embedding'
+	`).Scan(&existingType)
+	if existingType != "" && existingType != "USER-DEFINED" {
+		fmt.Printf("   ⚠️  kg_chunks.embedding has type %q, recreating as vector(%d)\n",
+			existingType, c.cfg.EmbedDim)
+		if _, err := c.db.ExecContext(ctx, `DROP TABLE IF EXISTS kg_chunks CASCADE`); err != nil {
+			return fmt.Errorf("kg: failed to drop stale kg_chunks: %w", err)
+		}
+	}
+	if _, err := c.db.ExecContext(ctx, fmt.Sprintf(`
 		CREATE TABLE IF NOT EXISTS kg_chunks (
 			id          BIGSERIAL PRIMARY KEY,
 			entity_name TEXT,
 			source_table TEXT,
 			content     TEXT NOT NULL,
-			embedding   text,
+			embedding   vector(%d),
 			created_at  TIMESTAMPTZ DEFAULT NOW()
 		)
-	`)
-	c.db.ExecContext(ctx, `
+	`, c.cfg.EmbedDim)); err != nil {
+		return fmt.Errorf("kg: failed to create kg_chunks: %w", err)
+	}
+	if _, err := c.db.ExecContext(ctx, `
 		CREATE INDEX IF NOT EXISTS kg_chunks_embed_idx
 		ON kg_chunks USING hnsw (embedding vector_cosine_ops)
-	`)
-	c.db.ExecContext(ctx, `
+	`); err != nil {
+		return fmt.Errorf("kg: failed to create kg_chunks_embed_idx: %w", err)
+	}
+	if _, err := c.db.ExecContext(ctx, `
 		CREATE INDEX IF NOT EXISTS kg_chunks_entity_idx
 		ON kg_chunks (entity_name)
-	`)
+	`); err != nil {
+		return fmt.Errorf("kg: failed to create kg_chunks_entity_idx: %w", err)
+	}
 
 	return nil
 }
@@ -312,6 +359,15 @@ Schema:
 
 Translate this question into a Cypher MATCH/RETURN query:
 "%s"
+
+CRITICAL CONSTRAINT: The RETURN clause must produce EXACTLY ONE VALUE per row.
+  - GOOD: RETURN c
+  - GOOD: RETURN c.name + ' works at ' + co.name AS summary
+  - GOOD: RETURN collect(co.name) AS companies
+  - BAD:  RETURN c, co       (two columns — will error in AGE)
+  - BAD:  RETURN c.name, co.name  (two columns)
+
+If you need data from multiple nodes, concatenate into a single string or use collect().
 
 Return ONLY the Cypher query, no explanation. Use variable-length paths [*1..%d] when exploring connections.
 
