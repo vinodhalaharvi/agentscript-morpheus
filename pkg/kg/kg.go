@@ -338,7 +338,7 @@ Return ONLY the Cypher query, no explanation. Use variable-length paths [*1..%d]
 
 	// Summarize with LLM
 	return c.generate(ctx, fmt.Sprintf(
-		"Answer this question based on these graph query results.\nQuestion: %s\nResults:\n%s\n\nProvide a clear answer citing the data.",
+		"Answer this question based on these graph query results.\nQuestion: %s\nResults:\n%s\n\nANSWER:",
 		question, strings.Join(results, "\n")))
 }
 
@@ -428,7 +428,7 @@ func (c *Client) Hybrid(ctx context.Context, question string) (string, error) {
 
 	fullContext := strings.Join(contextParts, "\n\n")
 	return c.generate(ctx, fmt.Sprintf(
-		"Answer this question based ONLY on the provided facts and text. Show your reasoning path.\n\n%s\n\nQUESTION: %s",
+		"Based on these facts and text, answer the question.\n\n%s\n\nQUESTION: %s\nANSWER:",
 		fullContext, question))
 }
 
@@ -462,7 +462,7 @@ func (c *Client) Path(ctx context.Context, from, to string) (string, error) {
 
 	// Summarize with LLM
 	return c.generate(ctx, fmt.Sprintf(
-		"Explain this connection path in plain English:\n%s\n\nHow is '%s' connected to '%s'?",
+		"Explain this connection path in plain English:\n%s\n\nHow is '%s' connected to '%s'?\nANSWER:",
 		strings.Join(paths, "\n"), from, to))
 }
 
