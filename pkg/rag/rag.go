@@ -223,6 +223,7 @@ func (c *Client) Index(ctx context.Context, table string, columns []string) (*In
 				}
 			}
 
+			fmt.Printf("   🔍 Vector search returned %d chunks\n", len(chunks))
 			if len(chunks) == 0 {
 				continue
 			}
@@ -332,6 +333,7 @@ func (c *Client) Query(ctx context.Context, question string, tables ...string) (
 		chunks = append(chunks, r)
 	}
 
+	fmt.Printf("   🔍 Vector search returned %d chunks\n", len(chunks))
 	if len(chunks) == 0 {
 		return "No relevant data found.", nil
 	}
@@ -349,14 +351,16 @@ func (c *Client) Query(ctx context.Context, question string, tables ...string) (
 		}
 	}
 	contextBuilder.WriteString(fmt.Sprintf("\n\nQUESTION: %s\n", question))
-	contextBuilder.WriteString("\nProvide a clear, concise answer based only on the data above.")
+	contextBuilder.WriteString("\n\nBased on the data above, provide a specific answer with customer names.\nANSWER:")
 
 	// 4. Send to LLM for answer
+	fmt.Printf("   📝 Prompt size: %d chars\n", contextBuilder.Len())
 	answer, err := c.generate(ctx, contextBuilder.String())
 	if err != nil {
 		return "", fmt.Errorf("rag: LLM generation failed: %w", err)
 	}
 
+	fmt.Printf("   💬 LLM answer length: %d\n", len(answer))
 	return answer, nil
 }
 
@@ -674,6 +678,7 @@ func (p *Plugin) queryCmd(ctx context.Context, args []string, input string) (str
 		return "", err
 	}
 
+	fmt.Printf("   💬 LLM answer length: %d\n", len(answer))
 	return answer, nil
 }
 
