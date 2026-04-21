@@ -134,11 +134,17 @@ func (c *Client) Connect(ctx context.Context) error {
 	`, c.cfg.EmbedDim)); err != nil {
 		return fmt.Errorf("kg: failed to create kg_entity_embeddings: %w", err)
 	}
-	if _, err := c.db.ExecContext(ctx, `
-		CREATE INDEX IF NOT EXISTS kg_entity_embed_idx
-		ON kg_entity_embeddings USING hnsw (embedding vector_cosine_ops)
-	`); err != nil {
-		return fmt.Errorf("kg: failed to create kg_entity_embed_idx: %w", err)
+	// HNSW has a 2000-dim limit in pgvector. For higher-dim models, skip the index
+	// — <=> still works via sequential scan, which is fine at KG scale (<10k rows).
+	if c.cfg.EmbedDim <= 2000 {
+		if _, err := c.db.ExecContext(ctx, `
+			CREATE INDEX IF NOT EXISTS kg_entity_embed_idx
+			ON kg_entity_embeddings USING hnsw (embedding vector_cosine_ops)
+		`); err != nil {
+			return fmt.Errorf("kg: failed to create kg_entity_embed_idx: %w", err)
+		}
+	} else {
+		fmt.Printf("   ℹ️  Skipping HNSW on kg_entity_embeddings (dim %d > 2000 pgvector limit); using sequential scan\n", c.cfg.EmbedDim)
 	}
 
 	// Create text chunks table for supporting context.
@@ -166,11 +172,15 @@ func (c *Client) Connect(ctx context.Context) error {
 	`, c.cfg.EmbedDim)); err != nil {
 		return fmt.Errorf("kg: failed to create kg_chunks: %w", err)
 	}
-	if _, err := c.db.ExecContext(ctx, `
-		CREATE INDEX IF NOT EXISTS kg_chunks_embed_idx
-		ON kg_chunks USING hnsw (embedding vector_cosine_ops)
-	`); err != nil {
-		return fmt.Errorf("kg: failed to create kg_chunks_embed_idx: %w", err)
+	if c.cfg.EmbedDim <= 2000 {
+		if _, err := c.db.ExecContext(ctx, `
+			CREATE INDEX IF NOT EXISTS kg_chunks_embed_idx
+			ON kg_chunks USING hnsw (embedding vector_cosine_ops)
+		`); err != nil {
+			return fmt.Errorf("kg: failed to create kg_chunks_embed_idx: %w", err)
+		}
+	} else {
+		fmt.Printf("   ℹ️  Skipping HNSW on kg_chunks (dim %d > 2000 pgvector limit); using sequential scan\n", c.cfg.EmbedDim)
 	}
 	if _, err := c.db.ExecContext(ctx, `
 		CREATE INDEX IF NOT EXISTS kg_chunks_entity_idx
