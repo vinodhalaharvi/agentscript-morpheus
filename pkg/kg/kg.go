@@ -33,11 +33,12 @@ type Config struct {
 
 // Client is the Knowledge Graph plugin client
 type Client struct {
-	cfg          Config
-	db           *sql.DB
-	httpClient   *http.Client
-	serverType   string // "ollama", "llama", or "claude"
-	claudeClient *claude.ClaudeClient
+	cfg             Config
+	db              *sql.DB
+	httpClient      *http.Client
+	serverType      string // "ollama", "llama", or "claude" (for generation)
+	embedServerType string // "ollama" or "llama" (for embeddings; only used when serverType=="claude")
+	claudeClient    *claude.ClaudeClient
 }
 
 // NewClient creates a new KG client
@@ -328,7 +329,7 @@ CYPHER:`,
 	rows, err := c.cypher(ctx, cypherQuery, "result agtype")
 	if err != nil {
 		// Fallback to hybrid retrieval on Cypher error
-		fmt.Printf("   ⚠️  Cypher failed, falling back to hybrid retrieval\n")
+		fmt.Printf("   ⚠️  Cypher failed (%v), falling back to hybrid retrieval\n", err)
 		return c.Hybrid(ctx, question)
 	}
 	defer rows.Close()
@@ -633,9 +634,18 @@ func (c *Client) embed(ctx context.Context, text string) ([]float64, error) {
 	if c.serverType == "" {
 		c.detectServer(ctx)
 	}
+	// Anthropic has no embeddings API. When Claude is the generation backend,
+	// we still need a local LLM server for embeddings. Probe it once.
+	embedServerType := c.serverType
+	if embedServerType == "claude" {
+		if c.embedServerType == "" {
+			c.detectEmbedServer(ctx)
+		}
+		embedServerType = c.embedServerType
+	}
 	var url string
 	var jsonBody []byte
-	if c.serverType == "llama" {
+	if embedServerType == "llama" {
 		url = c.cfg.LLMURL + "/embedding"
 		reqBody := map[string]interface{}{"content": text}
 		jsonBody, _ = json.Marshal(reqBody)
@@ -656,9 +666,10 @@ func (c *Client) embed(ctx context.Context, text string) ([]float64, error) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("embedding error %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("embedding error %d (embed-server=%s, url=%s): %s",
+			resp.StatusCode, embedServerType, url, string(body))
 	}
-	if c.serverType == "llama" {
+	if embedServerType == "llama" {
 		var result []struct {
 			Embedding json.RawMessage `json:"embedding"`
 		}
@@ -694,6 +705,24 @@ func (c *Client) embed(ctx context.Context, text string) ([]float64, error) {
 		return nil, err
 	}
 	return result.Embedding, nil
+}
+
+// detectEmbedServer probes LLMURL to determine embedding server shape (llama vs ollama).
+// Used only when the generation backend is Claude, so we can't reuse serverType.
+func (c *Client) detectEmbedServer(ctx context.Context) {
+	req, _ := http.NewRequestWithContext(ctx, "GET", c.cfg.LLMURL+"/health", nil)
+	resp, err := c.httpClient.Do(req)
+	if err == nil {
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		if strings.Contains(string(body), "status") {
+			c.embedServerType = "llama"
+			fmt.Printf("   🔍 Embeddings: using local llama.cpp at %s\n", c.cfg.LLMURL)
+			return
+		}
+	}
+	c.embedServerType = "ollama"
+	fmt.Printf("   🔍 Embeddings: using local Ollama at %s\n", c.cfg.LLMURL)
 }
 
 func (c *Client) generate(ctx context.Context, prompt string) (string, error) {
@@ -959,6 +988,22 @@ func (p *Plugin) connectCmd(ctx context.Context, args []string, input string) (s
 	llmURL := plugin.Coalesce(args, 1, "http://localhost:11434")
 	llmModel := plugin.Coalesce(args, 2, "qwen2.5-coder:7b")
 	graphName := plugin.Coalesce(args, 3, "knowledge")
+
+	// Surface Claude-mode clearly so users aren't confused by the llmURL in logs.
+	// Anthropic has no embeddings API, so the local LLM is still needed for embeddings.
+	if os.Getenv("CLAUDE_API_KEY") != "" {
+		fmt.Println()
+		fmt.Println("╔══════════════════════════════════════════════════════════════════╗")
+		fmt.Println("║  ⚡ CLAUDE_API_KEY detected — routing generation to Claude       ║")
+		fmt.Println("║                                                                  ║")
+		fmt.Println("║  • entity extraction, Cypher gen, answer synthesis → Claude API  ║")
+		fmt.Printf("║  • embeddings → local LLM at %-35s ║\n", llmURL)
+		fmt.Println("║    (Anthropic has no embeddings API; local LLM still required)   ║")
+		fmt.Println("║                                                                  ║")
+		fmt.Println("║  Unset CLAUDE_API_KEY to use the local LLM for everything.       ║")
+		fmt.Println("╚══════════════════════════════════════════════════════════════════╝")
+		fmt.Println()
+	}
 
 	p.client = NewClient(Config{
 		PostgresURL: pgURL,
