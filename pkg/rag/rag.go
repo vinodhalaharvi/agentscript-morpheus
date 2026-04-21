@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	_ "github.com/lib/pq"
 	"github.com/vinodhalaharvi/agentscript/pkg/plugin"
 )
 
@@ -34,6 +35,7 @@ type Client struct {
 	db         *sql.DB
 	httpClient *http.Client
 	serverType string // "ollama" or "llama"
+	embedDim   int    // detected embedding dimension
 }
 
 // NewClient creates a new RAG client. Does NOT connect yet — call Connect().
@@ -80,7 +82,7 @@ func (c *Client) Connect(ctx context.Context) error {
 			source_id TEXT NOT NULL,
 			chunk_index INT NOT NULL DEFAULT 0,
 			chunk_text TEXT NOT NULL,
-			embedding vector(4096),
+			embedding text,
 			metadata JSONB DEFAULT '{}',
 			created_at TIMESTAMPTZ DEFAULT NOW(),
 			UNIQUE(source_table, source_id, chunk_index)
@@ -89,13 +91,7 @@ func (c *Client) Connect(ctx context.Context) error {
 		return fmt.Errorf("rag: failed to create embeddings table: %w", err)
 	}
 
-	// Create vector index (if not exists)
-	c.db.ExecContext(ctx, `
-		CREATE INDEX IF NOT EXISTS rag_embeddings_vector_idx 
-		ON rag_embeddings USING ivfflat (embedding vector_cosine_ops)
-		WITH (lists = 100)
-	`)
-
+	// Vector index created in ensureVectorSchema() after dimension detection
 	return nil
 }
 
@@ -182,10 +178,10 @@ func (c *Client) Index(ctx context.Context, table string, columns []string) (*In
 	c.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", table)).Scan(&totalRows)
 
 	result := &IndexResult{
-		Table:      table,
-		Columns:    columns,
-		TotalRows:  totalRows,
-		BatchSize:  c.cfg.BatchSize,
+		Table:     table,
+		Columns:   columns,
+		TotalRows: totalRows,
+		BatchSize: c.cfg.BatchSize,
 	}
 
 	// Process in batches
@@ -242,6 +238,7 @@ func (c *Client) Index(ctx context.Context, table string, columns []string) (*In
 					result.Errors++
 					continue
 				}
+				c.ensureVectorSchema(ctx, len(embedding))
 
 				// Upsert into embeddings table
 				metaJSON, _ := json.Marshal(metadata)
@@ -297,6 +294,7 @@ func (c *Client) Query(ctx context.Context, question string, tables ...string) (
 	if err != nil {
 		return "", fmt.Errorf("rag: failed to embed question: %w", err)
 	}
+	c.ensureVectorSchema(ctx, len(qEmbed))
 
 	// 2. Vector similarity search
 	tableFilter := ""
@@ -404,19 +402,34 @@ func (c *Client) embed(ctx context.Context, text string) ([]float64, error) {
 	}
 	if c.serverType == "llama" {
 		var result []struct {
-			Embedding []float64 `json:"embedding"`
+			Embedding json.RawMessage `json:"embedding"`
 		}
-		if err := json.Unmarshal(body, &result); err != nil {
-			var single struct{ Embedding []float64 `json:"embedding"` }
-			if err2 := json.Unmarshal(body, &single); err2 != nil {
-				return nil, err
+		if err := json.Unmarshal(body, &result); err != nil || len(result) == 0 {
+			return nil, fmt.Errorf("failed to parse llama embedding: %w", err)
+		}
+		raw := result[0].Embedding
+		// Try nested format [[tok1_vec], [tok2_vec], ...] — mean-pool across tokens
+		var nested [][]float64
+		if err := json.Unmarshal(raw, &nested); err == nil && len(nested) > 0 {
+			dim := len(nested[0])
+			pooled := make([]float64, dim)
+			for _, tok := range nested {
+				for i, v := range tok {
+					pooled[i] += v
+				}
 			}
-			return single.Embedding, nil
+			n := float64(len(nested))
+			for i := range pooled {
+				pooled[i] /= n
+			}
+			return pooled, nil
 		}
-		if len(result) > 0 {
-			return result[0].Embedding, nil
+		// Try flat format [0.1, 0.2, ...]
+		var flat []float64
+		if err := json.Unmarshal(raw, &flat); err == nil {
+			return flat, nil
 		}
-		return nil, fmt.Errorf("empty embedding response")
+		return nil, fmt.Errorf("cannot parse embedding format")
 	}
 	var result struct {
 		Embedding []float64 `json:"embedding"`
@@ -425,6 +438,30 @@ func (c *Client) embed(ctx context.Context, text string) ([]float64, error) {
 		return nil, fmt.Errorf("failed to parse embedding response: %w", err)
 	}
 	return result.Embedding, nil
+}
+
+// ensureVectorSchema migrates the embedding column to proper vector type
+// once we know the actual dimension from the LLM server
+func (c *Client) ensureVectorSchema(ctx context.Context, dim int) {
+	if c.embedDim > 0 {
+		return
+	}
+	c.embedDim = dim
+	fmt.Printf("   📐 Detected embedding dimension: %d\n", dim)
+	var colType string
+	c.db.QueryRowContext(ctx,
+		"SELECT data_type FROM information_schema.columns WHERE table_name='rag_embeddings' AND column_name='embedding'",
+	).Scan(&colType)
+	if colType == "USER-DEFINED" {
+		return // already vector type
+	}
+	c.db.ExecContext(ctx, "ALTER TABLE rag_embeddings DROP COLUMN IF EXISTS embedding")
+	c.db.ExecContext(ctx, fmt.Sprintf(
+		"ALTER TABLE rag_embeddings ADD COLUMN embedding vector(%d)", dim))
+	c.db.ExecContext(ctx, `
+		CREATE INDEX IF NOT EXISTS rag_embeddings_vector_idx
+		ON rag_embeddings USING hnsw (embedding vector_cosine_ops)
+	`)
 }
 
 // generate calls the LLM server for text generation
@@ -459,13 +496,17 @@ func (c *Client) generate(ctx context.Context, prompt string) (string, error) {
 		return "", fmt.Errorf("generate error %d: %s", resp.StatusCode, string(body))
 	}
 	if c.serverType == "llama" {
-		var result struct{ Content string `json:"content"` }
+		var result struct {
+			Content string `json:"content"`
+		}
 		if err := json.Unmarshal(body, &result); err != nil {
 			return "", fmt.Errorf("failed to parse response: %w", err)
 		}
 		return result.Content, nil
 	}
-	var result struct{ Response string `json:"response"` }
+	var result struct {
+		Response string `json:"response"`
+	}
 	if err := json.Unmarshal(body, &result); err != nil {
 		return "", fmt.Errorf("failed to parse generate response: %w", err)
 	}

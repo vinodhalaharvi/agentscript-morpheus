@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	_ "github.com/lib/pq"
 	"github.com/vinodhalaharvi/agentscript/pkg/plugin"
 )
 
@@ -97,7 +98,7 @@ func (c *Client) Connect(ctx context.Context) error {
 		CREATE TABLE IF NOT EXISTS kg_entity_embeddings (
 			entity_name TEXT PRIMARY KEY,
 			entity_type TEXT,
-			embedding   VECTOR(4096),
+			embedding   text,
 			properties  JSONB DEFAULT '{}',
 			created_at  TIMESTAMPTZ DEFAULT NOW()
 		)
@@ -114,7 +115,7 @@ func (c *Client) Connect(ctx context.Context) error {
 			entity_name TEXT,
 			source_table TEXT,
 			content     TEXT NOT NULL,
-			embedding   VECTOR(4096),
+			embedding   text,
 			created_at  TIMESTAMPTZ DEFAULT NOW()
 		)
 	`)
@@ -648,19 +649,32 @@ func (c *Client) embed(ctx context.Context, text string) ([]float64, error) {
 	}
 	if c.serverType == "llama" {
 		var result []struct {
-			Embedding []float64 `json:"embedding"`
+			Embedding json.RawMessage `json:"embedding"`
 		}
-		if err := json.Unmarshal(body, &result); err != nil {
-			var single struct{ Embedding []float64 `json:"embedding"` }
-			if err2 := json.Unmarshal(body, &single); err2 != nil {
-				return nil, err
+		if err := json.Unmarshal(body, &result); err != nil || len(result) == 0 {
+			return nil, fmt.Errorf("failed to parse llama embedding: %w", err)
+		}
+		raw := result[0].Embedding
+		var nested [][]float64
+		if err := json.Unmarshal(raw, &nested); err == nil && len(nested) > 0 {
+			dim := len(nested[0])
+			pooled := make([]float64, dim)
+			for _, tok := range nested {
+				for i, v := range tok {
+					pooled[i] += v
+				}
 			}
-			return single.Embedding, nil
+			n := float64(len(nested))
+			for i := range pooled {
+				pooled[i] /= n
+			}
+			return pooled, nil
 		}
-		if len(result) > 0 {
-			return result[0].Embedding, nil
+		var flat []float64
+		if err := json.Unmarshal(raw, &flat); err == nil {
+			return flat, nil
 		}
-		return nil, fmt.Errorf("empty embedding response")
+		return nil, fmt.Errorf("cannot parse embedding format")
 	}
 	var result struct {
 		Embedding []float64 `json:"embedding"`
@@ -701,13 +715,17 @@ func (c *Client) generate(ctx context.Context, prompt string) (string, error) {
 		return "", fmt.Errorf("generate error %d: %s", resp.StatusCode, string(body))
 	}
 	if c.serverType == "llama" {
-		var result struct{ Content string `json:"content"` }
+		var result struct {
+			Content string `json:"content"`
+		}
 		if err := json.Unmarshal(body, &result); err != nil {
 			return "", err
 		}
 		return result.Content, nil
 	}
-	var result struct{ Response string `json:"response"` }
+	var result struct {
+		Response string `json:"response"`
+	}
 	if err := json.Unmarshal(body, &result); err != nil {
 		return "", err
 	}
