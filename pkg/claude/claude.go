@@ -19,7 +19,7 @@ type ClaudeClient struct {
 
 // NewClaudeClient creates a new Claude API client
 func NewClaudeClient(apiKey string) *ClaudeClient {
-	model := "claude-opus-4-20250514"
+	model := "claude-opus-4-7"
 	return &ClaudeClient{
 		apiKey:     apiKey,
 		model:      model,

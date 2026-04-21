@@ -11,10 +11,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
 	_ "github.com/lib/pq"
+	"github.com/vinodhalaharvi/agentscript/pkg/claude"
 	"github.com/vinodhalaharvi/agentscript/pkg/plugin"
 )
 
@@ -31,10 +33,11 @@ type Config struct {
 
 // Client is the Knowledge Graph plugin client
 type Client struct {
-	cfg        Config
-	db         *sql.DB
-	httpClient *http.Client
-	serverType string // "ollama" or "llama"
+	cfg          Config
+	db           *sql.DB
+	httpClient   *http.Client
+	serverType   string // "ollama", "llama", or "claude"
+	claudeClient *claude.ClaudeClient
 }
 
 // NewClient creates a new KG client
@@ -697,6 +700,13 @@ func (c *Client) generate(ctx context.Context, prompt string) (string, error) {
 	if c.serverType == "" {
 		c.detectServer(ctx)
 	}
+	// Claude path — cloud LLM via Anthropic API
+	if c.serverType == "claude" {
+		if c.claudeClient == nil {
+			return "", fmt.Errorf("kg: claude client not initialized (set ANTHROPIC_API_KEY)")
+		}
+		return c.claudeClient.Chat(ctx, prompt)
+	}
 	var url string
 	var jsonBody []byte
 	if c.serverType == "llama" {
@@ -740,8 +750,15 @@ func (c *Client) generate(ctx context.Context, prompt string) (string, error) {
 	return result.Response, nil
 }
 
-// detectServer probes the LLM server to determine type
+// detectServer probes the LLM server to determine type.
+// Priority: ANTHROPIC_API_KEY env var → Claude cloud, else probe local LLMURL.
 func (c *Client) detectServer(ctx context.Context) {
+	if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
+		c.serverType = "claude"
+		c.claudeClient = claude.NewClaudeClient(key)
+		fmt.Printf("   🔍 Using Claude (Anthropic API)\n")
+		return
+	}
 	req, _ := http.NewRequestWithContext(ctx, "GET", c.cfg.LLMURL+"/health", nil)
 	resp, err := c.httpClient.Do(req)
 	if err == nil {
