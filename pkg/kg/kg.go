@@ -33,6 +33,7 @@ type Client struct {
 	cfg        Config
 	db         *sql.DB
 	httpClient *http.Client
+	serverType string // "ollama" or "llama"
 }
 
 // NewClient creates a new KG client
@@ -617,30 +618,50 @@ func (c *Client) getSchema(ctx context.Context) (string, error) {
 // --- LLM helpers ---
 
 func (c *Client) embed(ctx context.Context, text string) ([]float64, error) {
-	reqBody := map[string]interface{}{
-		"model":  c.cfg.EmbedModel,
-		"prompt": text,
+	if c.serverType == "" {
+		c.detectServer(ctx)
 	}
-	jsonBody, _ := json.Marshal(reqBody)
-
-	req, err := http.NewRequestWithContext(ctx, "POST",
-		c.cfg.LLMURL+"/api/embeddings", bytes.NewReader(jsonBody))
+	var url string
+	var jsonBody []byte
+	if c.serverType == "llama" {
+		url = c.cfg.LLMURL + "/embedding"
+		reqBody := map[string]interface{}{"content": text}
+		jsonBody, _ = json.Marshal(reqBody)
+	} else {
+		url = c.cfg.LLMURL + "/api/embeddings"
+		reqBody := map[string]interface{}{"model": c.cfg.EmbedModel, "prompt": text}
+		jsonBody, _ = json.Marshal(reqBody)
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("embedding error %d: %s", resp.StatusCode, string(body))
 	}
-
+	if c.serverType == "llama" {
+		var result []struct {
+			Embedding []float64 `json:"embedding"`
+		}
+		if err := json.Unmarshal(body, &result); err != nil {
+			var single struct{ Embedding []float64 `json:"embedding"` }
+			if err2 := json.Unmarshal(body, &single); err2 != nil {
+				return nil, err
+			}
+			return single.Embedding, nil
+		}
+		if len(result) > 0 {
+			return result[0].Embedding, nil
+		}
+		return nil, fmt.Errorf("empty embedding response")
+	}
 	var result struct {
 		Embedding []float64 `json:"embedding"`
 	}
@@ -651,38 +672,63 @@ func (c *Client) embed(ctx context.Context, text string) ([]float64, error) {
 }
 
 func (c *Client) generate(ctx context.Context, prompt string) (string, error) {
-	reqBody := map[string]interface{}{
-		"model":  c.cfg.LLMModel,
-		"prompt": prompt,
-		"stream": false,
+	if c.serverType == "" {
+		c.detectServer(ctx)
 	}
-	jsonBody, _ := json.Marshal(reqBody)
-
-	req, err := http.NewRequestWithContext(ctx, "POST",
-		c.cfg.LLMURL+"/api/generate", bytes.NewReader(jsonBody))
+	var url string
+	var jsonBody []byte
+	if c.serverType == "llama" {
+		url = c.cfg.LLMURL + "/completion"
+		reqBody := map[string]interface{}{"prompt": prompt, "n_predict": 2048, "stream": false}
+		jsonBody, _ = json.Marshal(reqBody)
+	} else {
+		url = c.cfg.LLMURL + "/api/generate"
+		reqBody := map[string]interface{}{"model": c.cfg.LLMModel, "prompt": prompt, "stream": false}
+		jsonBody, _ = json.Marshal(reqBody)
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
-
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
 		return "", fmt.Errorf("generate error %d: %s", resp.StatusCode, string(body))
 	}
-
-	var result struct {
-		Response string `json:"response"`
+	if c.serverType == "llama" {
+		var result struct{ Content string `json:"content"` }
+		if err := json.Unmarshal(body, &result); err != nil {
+			return "", err
+		}
+		return result.Content, nil
 	}
+	var result struct{ Response string `json:"response"` }
 	if err := json.Unmarshal(body, &result); err != nil {
 		return "", err
 	}
 	return result.Response, nil
+}
+
+// detectServer probes the LLM server to determine type
+func (c *Client) detectServer(ctx context.Context) {
+	req, _ := http.NewRequestWithContext(ctx, "GET", c.cfg.LLMURL+"/health", nil)
+	resp, err := c.httpClient.Do(req)
+	if err == nil {
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		if strings.Contains(string(body), "status") {
+			c.serverType = "llama"
+			fmt.Printf("   🔍 Detected llama.cpp server\n")
+			return
+		}
+	}
+	c.serverType = "ollama"
+	fmt.Printf("   🔍 Detected Ollama server\n")
 }
 
 // --- Schema discovery ---
