@@ -231,6 +231,8 @@ JSON:`, table, strings.Join(colNames, ", "), string(sampleJSON))
 			result.Errors++
 			continue
 		}
+		fmt.Printf("   🔎 LLM extract response for %s (%d chars): %s\n",
+			table, len(response), truncateStr(response, 300))
 
 		// Parse LLM response
 		extracted, err := parseExtraction(response)
@@ -966,10 +968,23 @@ func (p *Plugin) extractCmd(ctx context.Context, args []string, input string) (s
 		return "", fmt.Errorf("kg: specify table names")
 	}
 
-	// Support comma-separated or space-separated tables
+	// Support comma-separated or space-separated tables.
+	// Filter empty args — Arg2/Arg3/Arg4 may be blank from the grammar.
 	var tables []string
 	for _, arg := range args {
-		tables = append(tables, strings.Split(arg, ",")...)
+		if arg == "" {
+			continue
+		}
+		for _, t := range strings.Split(arg, ",") {
+			t = strings.TrimSpace(t)
+			if t != "" {
+				tables = append(tables, t)
+			}
+		}
+	}
+
+	if len(tables) == 0 {
+		return "", fmt.Errorf("kg: specify table names")
 	}
 
 	fmt.Printf("📊 Extracting knowledge graph from %d tables...\n", len(tables))
@@ -1062,4 +1077,12 @@ func (p *Plugin) statusCmd(ctx context.Context, args []string, input string) (st
 	}
 
 	return p.client.Status(ctx)
+}
+
+// truncateStr returns s truncated to max chars with "..." suffix if over.
+func truncateStr(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
 }
