@@ -214,7 +214,9 @@ func preprocessDSL(dsl string) string {
 }
 
 // preprocessConverge extracts converge blocks and rewrites them as:
-//   converge "name" "encoded-body"
+//
+//	converge "name" "encoded-body"
+//
 // The body is the raw text between the outermost ( ) of the converge block,
 // with internal quotes escaped and newlines preserved via |||.
 func preprocessConverge(dsl string) string {
@@ -285,13 +287,21 @@ func preprocessConverge(dsl string) string {
 				inQ := inDouble || inSingle || inBacktick
 
 				if !inQ {
-					if c == '"' { inDouble = true } else
-					if c == '\'' { inSingle = true } else
-					if c == '`' { inBacktick = true }
+					if c == '"' {
+						inDouble = true
+					} else if c == '\'' {
+						inSingle = true
+					} else if c == '`' {
+						inBacktick = true
+					}
 				} else {
-					if c == '"' && inDouble && prev != '\\' { inDouble = false } else
-					if c == '\'' && inSingle && prev != '\\' { inSingle = false } else
-					if c == '`' && inBacktick { inBacktick = false }
+					if c == '"' && inDouble && prev != '\\' {
+						inDouble = false
+					} else if c == '\'' && inSingle && prev != '\\' {
+						inSingle = false
+					} else if c == '`' && inBacktick {
+						inBacktick = false
+					}
 				}
 
 				if !inDouble && !inSingle && !inBacktick {
@@ -529,8 +539,8 @@ func (r *Runtime) executeCommand(ctx context.Context, cmd *Command, input string
 	r.log("Executing: %s %q (input: %d bytes)", cmd.Action, cmd.Arg, len(input))
 
 	// Try plugin registry first.
-	// args follows the grammar: [Arg, Arg2, Arg3] — trimmed to non-empty.
-	args := []string{cmd.Arg, cmd.Arg2, cmd.Arg3}
+	// args follows the grammar: [Arg, Arg2, Arg3, Arg4] — trimmed to non-empty.
+	args := []string{cmd.Arg, cmd.Arg2, cmd.Arg3, cmd.Arg4}
 	if result, ok, err := r.registry.Execute(ctx, cmd.Action, args, input); ok {
 		if err != nil {
 			return "", fmt.Errorf("%s failed: %w", cmd.Action, err)

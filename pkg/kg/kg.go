@@ -222,7 +222,9 @@ Return a JSON object with:
 
 Entity names should be meaningful values from the data (names, IDs, categories).
 Relationship types should be uppercase like PLACED_ORDER, BELONGS_TO, SUPPLIED_BY.
-Return ONLY valid JSON, no explanation.`, table, strings.Join(colNames, ", "), string(sampleJSON))
+Return ONLY valid JSON, no explanation.
+
+JSON:`, table, strings.Join(colNames, ", "), string(sampleJSON))
 
 		response, err := c.generate(ctx, prompt)
 		if err != nil {
@@ -305,7 +307,9 @@ Schema:
 Translate this question into a Cypher MATCH/RETURN query:
 "%s"
 
-Return ONLY the Cypher query, no explanation. Use variable-length paths [*1..%d] when exploring connections.`,
+Return ONLY the Cypher query, no explanation. Use variable-length paths [*1..%d] when exploring connections.
+
+CYPHER:`,
 		c.cfg.GraphName, schema, question, c.cfg.MaxHops)
 
 	cypherQuery, err := c.generate(ctx, prompt)
@@ -485,7 +489,9 @@ Rules:
 - Entity types should be PascalCase (Person, Company, Product, Event, Location, Concept)
 - Relationship types should be UPPER_SNAKE_CASE (WORKS_FOR, LOCATED_IN, PRODUCES)
 - Extract ALL entities and relationships, not just the obvious ones
-- Return ONLY valid JSON`, text)
+- Return ONLY valid JSON
+
+JSON:`, text)
 
 	response, err := c.generate(ctx, prompt)
 	if err != nil {

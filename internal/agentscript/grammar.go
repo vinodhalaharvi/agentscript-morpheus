@@ -60,6 +60,7 @@ type Command struct {
 	Arg  string `@String?`
 	Arg2 string `@String?`
 	Arg3 string `@String?`
+	Arg4 string `@String?`
 }
 
 // Lexer definition — Morpheus operators replace the old -> and parallel{} syntax
