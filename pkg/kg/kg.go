@@ -703,7 +703,7 @@ func (c *Client) generate(ctx context.Context, prompt string) (string, error) {
 	// Claude path — cloud LLM via Anthropic API
 	if c.serverType == "claude" {
 		if c.claudeClient == nil {
-			return "", fmt.Errorf("kg: claude client not initialized (set ANTHROPIC_API_KEY)")
+			return "", fmt.Errorf("kg: claude client not initialized (set CLAUDE_API_KEY)")
 		}
 		return c.claudeClient.Chat(ctx, prompt)
 	}
@@ -751,9 +751,9 @@ func (c *Client) generate(ctx context.Context, prompt string) (string, error) {
 }
 
 // detectServer probes the LLM server to determine type.
-// Priority: ANTHROPIC_API_KEY env var → Claude cloud, else probe local LLMURL.
+// Priority: CLAUDE_API_KEY env var → Claude cloud, else probe local LLMURL.
 func (c *Client) detectServer(ctx context.Context) {
-	if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
+	if key := os.Getenv("CLAUDE_API_KEY"); key != "" {
 		c.serverType = "claude"
 		c.claudeClient = claude.NewClaudeClient(key)
 		fmt.Printf("   🔍 Using Claude (Anthropic API)\n")
