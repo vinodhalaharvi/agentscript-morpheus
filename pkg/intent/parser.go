@@ -216,6 +216,19 @@ func parseTopLevelConfig(trimmed string, cfg *Config) bool {
 		return true
 	}
 
+	// readonly "gen/"
+	// readonly "vendor/"
+	// Protects a sandbox-relative path from LLM writes. Useful for
+	// directories produced by external tools (buf generate, protoc,
+	// sqlc, ent, go generate, etc.).
+	if strings.HasPrefix(trimmed, "readonly ") {
+		path := unquote(strings.TrimPrefix(trimmed, "readonly "))
+		if path != "" {
+			cfg.ReadOnlyPaths = append(cfg.ReadOnlyPaths, path)
+		}
+		return true
+	}
+
 	// mode patch | mode scaffold
 	if strings.HasPrefix(trimmed, "mode ") {
 		m := strings.TrimSpace(strings.TrimPrefix(trimmed, "mode "))
