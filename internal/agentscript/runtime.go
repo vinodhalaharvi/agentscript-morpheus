@@ -760,12 +760,21 @@ func (r *Runtime) executeConverge(ctx context.Context, name, encodedBody, input 
 		return "", fmt.Errorf("converge %q engine error: %w", name, err)
 	}
 
-	// Wire token reporter if session mode
+	// Wire token reporter + compactor if session mode
 	if session != nil {
 		engine.SetTokenReporter(func() {
 			fmt.Printf("\n   ┌─────────────────────────────────────────────┐\n")
 			fmt.Printf("   │ 📊 %s │\n", session.TokenSummary())
 			fmt.Printf("   └─────────────────────────────────────────────┘\n")
+		})
+
+		// Keep only the most recent assistant response in full. Prior
+		// proposals have been applied to the sandbox — their text is
+		// dead weight on every subsequent Chat() call.
+		engine.SetCompactor(func() {
+			before := session.MessageCount()
+			session.CompactOldAssistantMessages(1)
+			_ = before // reserved for future verbose logging
 		})
 	}
 

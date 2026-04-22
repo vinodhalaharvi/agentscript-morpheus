@@ -226,6 +226,54 @@ func (s *Session) MessageCount() int {
 	return len(s.messages)
 }
 
+// CompactOldAssistantMessages replaces the content of all assistant messages
+// except the most recent `keepLast` with a short placeholder. User messages
+// are left untouched.
+//
+// Motivation: in converge loops the assistant typically returns large JSON
+// proposals (file contents, patches, commands). Those are consumed by the
+// engine immediately and their full text is never needed again — the repo
+// state on disk is the source of truth. Keeping them in s.messages means
+// every subsequent Chat() call re-uploads them as input tokens, so cost
+// and latency grow linearly with loop count.
+//
+// This is called by the converge engine after each accepted proposal to
+// hold the in-flight context to roughly O(keepLast) large responses
+// instead of O(N).
+//
+// keepLast < 1 is clamped to 1 (we always preserve the most recent
+// assistant response so Claude can reference its own last decision).
+func (s *Session) CompactOldAssistantMessages(keepLast int) {
+	if keepLast < 1 {
+		keepLast = 1
+	}
+
+	// Find indices of assistant messages.
+	var assistantIdx []int
+	for i, m := range s.messages {
+		if m.Role == "assistant" {
+			assistantIdx = append(assistantIdx, i)
+		}
+	}
+	if len(assistantIdx) <= keepLast {
+		return
+	}
+
+	// Replace all but the last `keepLast` assistant messages with a
+	// placeholder. The placeholder preserves the turn-taking structure
+	// (Anthropic requires alternating user/assistant) while shrinking
+	// the payload.
+	cutoff := len(assistantIdx) - keepLast
+	for i := 0; i < cutoff; i++ {
+		idx := assistantIdx[i]
+		original := len(s.messages[idx].Content)
+		s.messages[idx].Content = fmt.Sprintf(
+			"[prior response elided — %d chars; changes already applied to the sandbox]",
+			original,
+		)
+	}
+}
+
 // TokenSummary returns a formatted string of token usage
 func (s *Session) TokenSummary() string {
 	return fmt.Sprintf("call %d: %d in / %d out (total: %d in / %d out)",

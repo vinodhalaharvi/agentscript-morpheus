@@ -35,11 +35,16 @@ type Config struct {
 	CommitPrefix string // prefix for commit messages (default "converge")
 }
 
-// HistoryEntry records a previous loop attempt
+// HistoryEntry records a previous loop attempt.
+//
+// Note: we intentionally do NOT store the full AI proposal text here.
+// Proposals can be 10-50KB of JSON with file contents, and they are
+// never read back — only Failures + ApplyErrors are ever referenced
+// in buildPrompt. In session mode Claude already remembers prior
+// proposals via the message history.
 type HistoryEntry struct {
 	Attempt     int
 	Failures    []string
-	Proposal    string
 	Accepted    bool
 	ApplyErrors []string
 }
@@ -144,6 +149,18 @@ func (s *Sandbox) WriteFile(path, content string) error {
 // TokenReportFunc is called after each AI call with usage info
 type TokenReportFunc func()
 
+// CompactFunc optionally trims older context from the underlying reasoner
+// (e.g. a multi-turn LLM session). Called after each accepted proposal has
+// been applied and committed. The engine is agnostic to the trimming
+// strategy — the caller decides what to keep.
+//
+// Why this exists: in session mode the reasoner resends the whole message
+// history on every call. Old assistant responses (huge JSON proposals) are
+// dead weight once the engine has applied them to disk — compacting them
+// holds per-call input-token cost roughly flat across loops instead of
+// letting it grow linearly.
+type CompactFunc func()
+
 // Engine runs the intent reconciliation loop
 type Engine struct {
 	config         Config
@@ -152,6 +169,7 @@ type Engine struct {
 	reasoner       ReasonerFunc
 	runDSL         RunDSLFunc
 	tokenReport    TokenReportFunc
+	compact        CompactFunc
 	diagnosticCmds []string // accumulated diagnostic commands from AI
 }
 
@@ -185,6 +203,13 @@ func NewEngine(cfg Config, reasoner ReasonerFunc, runDSL RunDSLFunc) (*Engine, e
 // SetTokenReporter sets a function to call after each AI call for token reporting
 func (e *Engine) SetTokenReporter(fn TokenReportFunc) {
 	e.tokenReport = fn
+}
+
+// SetCompactor sets a function to call after each accepted proposal is
+// applied. Typically used in session mode to trim older assistant responses
+// from the LLM message history. Optional — no-op if unset.
+func (e *Engine) SetCompactor(fn CompactFunc) {
+	e.compact = fn
 }
 
 // Run executes the reconciliation loop
@@ -227,13 +252,28 @@ func (e *Engine) Run() error {
 			e.gitRebase()
 		}
 
-		// 1. Collect context + adaptive diagnostics from last failure
-		fmt.Println("📋 Collecting context...")
-		contextOutput := e.collectContext()
-		if len(lastResults) > 0 {
-			diag := e.collectDiagnostics(lastResults)
-			if diag != "" {
-				contextOutput += "\n" + diag
+		// 1. Collect context + adaptive diagnostics from last failure.
+		//
+		// In session mode (loop 2+), buildPrompt takes the follow-up
+		// branch and never uses contextOutput — Claude remembers the
+		// prior context from the conversation history. Running all the
+		// context DSL commands + validate commands + diagnostic commands
+		// just to discard the output is a significant waste of time and
+		// compute, especially when context DSL contains slow things
+		// like `go test` or `tree` over large trees.
+		//
+		// We still always run step 2 (validations) below because those
+		// feed buildPrompt on BOTH branches.
+		isFollowUp := e.config.UseSession && len(e.history) > 0
+		var contextOutput string
+		if !isFollowUp {
+			fmt.Println("📋 Collecting context...")
+			contextOutput = e.collectContext()
+			if len(lastResults) > 0 {
+				diag := e.collectDiagnostics(lastResults)
+				if diag != "" {
+					contextOutput += "\n" + diag
+				}
 			}
 		}
 
@@ -291,12 +331,19 @@ func (e *Engine) Run() error {
 			if e.config.AutoCommit {
 				e.gitCommit(attempt)
 			}
+
+			// Compact older reasoner context (session mode only). The proposal
+			// we just applied is now reflected on disk / in git — re-uploading
+			// its full text on the next loop would be wasted tokens. In
+			// single-shot or Ollama modes this is a no-op (compact stays nil).
+			if e.compact != nil {
+				e.compact()
+			}
 		}
 
 		e.history = append(e.history, HistoryEntry{
 			Attempt:     attempt,
 			Failures:    e.failureNames(results),
-			Proposal:    proposal,
 			Accepted:    accepted,
 			ApplyErrors: applyErrors,
 		})
