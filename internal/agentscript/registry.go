@@ -19,6 +19,7 @@ import (
 	"github.com/vinodhalaharvi/agentscript/pkg/cloudrun"
 	agcrypto "github.com/vinodhalaharvi/agentscript/pkg/crypto"
 	"github.com/vinodhalaharvi/agentscript/pkg/datatable"
+	agexec "github.com/vinodhalaharvi/agentscript/pkg/exec"
 	aggithub "github.com/vinodhalaharvi/agentscript/pkg/github"
 	"github.com/vinodhalaharvi/agentscript/pkg/huggingface"
 	"github.com/vinodhalaharvi/agentscript/pkg/jobsearch"
@@ -97,6 +98,12 @@ func (r *Runtime) buildRegistry(c *cache.Cache) *plugin.Registry {
 
 	// --- Network diagnostics — pure Go, no external deps ---
 	reg.Register(network.NewPlugin(r.verbose))
+
+	// --- Shell exec — top-level shell primitive for pipelines ---
+	// Separate from converge's internal `exec` prefix inside validate()
+	// blocks; that one is parsed by pkg/intent/parser.go and never reaches
+	// this registry.
+	reg.Register(agexec.NewPlugin(r.verbose))
 
 	// --- PDF Form Fill — AI-powered PDF form filling ---
 	// Reasoner is Claude if available, Gemini as fallback.
