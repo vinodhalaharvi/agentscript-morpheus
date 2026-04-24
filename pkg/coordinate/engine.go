@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/vinodhalaharvi/agentscript/pkg/claude"
@@ -59,6 +62,49 @@ func (e *Engine) Run(ctx context.Context) (string, error) {
 	// Create blackboard
 	policy := parseWritePolicy(e.Config.WritePolicy)
 	board := blackboard.NewBoard(policy)
+
+	// ------------------------------------------------------------
+	// Filesystem bridge: if a sandbox is configured, subscribe a
+	// global handler that writes file-shaped blackboard entries to
+	// disk. This is what makes coordinate actually DELIVER work —
+	// agents produce code by writing to the board, and those writes
+	// become real files on disk automatically.
+	//
+	// "File-shaped" heuristic:
+	//   - Value is a string
+	//   - Key doesn't start with __ (engine-internal keys)
+	//   - Key contains "/" (nested path) OR ends with a known file
+	//     extension
+	// ------------------------------------------------------------
+	if e.Config.Sandbox != "" {
+		if err := os.MkdirAll(e.Config.Sandbox, 0755); err != nil {
+			return "", fmt.Errorf("create sandbox dir: %w", err)
+		}
+		fmt.Printf("   sandbox: %s\n", e.Config.Sandbox)
+
+		wildcardPat, _ := matching.Parse("_")
+		board.Subscribe("__fsbridge__", wildcardPat, nil,
+			func(ev blackboard.WriteEvent, _ matching.Bindings) error {
+				if !looksLikeFilePath(ev.Key) {
+					return nil
+				}
+				content, ok := ev.Value.(string)
+				if !ok {
+					return nil // not a string payload — skip
+				}
+				dst := filepath.Join(e.Config.Sandbox, ev.Key)
+				if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+					fmt.Printf("   ⚠️  fs-bridge: mkdir %s: %v\n", filepath.Dir(dst), err)
+					return nil
+				}
+				if err := os.WriteFile(dst, []byte(content), 0644); err != nil {
+					fmt.Printf("   ⚠️  fs-bridge: write %s: %v\n", dst, err)
+					return nil
+				}
+				fmt.Printf("   💾 fs-bridge: wrote %s (%d bytes)\n", dst, len(content))
+				return nil
+			})
+	}
 
 	// Create agents and wire their subscriptions to the board
 	agents := make([]*Agent, 0, len(e.Config.Agents))
@@ -190,4 +236,42 @@ func defaultStr(s, fallback string) string {
 		return fallback
 	}
 	return s
+}
+
+// looksLikeFilePath returns true if key resembles a filesystem path
+// and should be bridged to disk. Heuristic:
+//   - Reject engine-internal keys (start with "__")
+//   - Accept if key contains "/" (nested path like cmd/x/main.go)
+//   - Accept if key ends with a known source/config extension
+func looksLikeFilePath(key string) bool {
+	if strings.HasPrefix(key, "__") {
+		return false
+	}
+	if strings.Contains(key, "/") {
+		return true
+	}
+	// Leaf-only paths (no slash): recognize by extension
+	exts := []string{
+		".go", ".mod", ".sum",
+		".yaml", ".yml", ".json", ".toml", ".xml",
+		".md", ".txt", ".rst",
+		".sh", ".bash",
+		".sql", ".proto",
+		".py", ".rs", ".ts", ".js",
+		".dockerfile", ".Dockerfile",
+		".env", ".gitignore",
+		".html", ".css",
+	}
+	lower := strings.ToLower(key)
+	for _, ext := range exts {
+		if strings.HasSuffix(lower, ext) {
+			return true
+		}
+	}
+	// Common filenames without extensions
+	switch key {
+	case "Makefile", "Dockerfile", "LICENSE", "README", "CHANGELOG":
+		return true
+	}
+	return false
 }

@@ -80,8 +80,9 @@ func (a *Agent) handleEvent(ctx context.Context, sub AgentSubscription, ev black
 		return nil
 	}
 
-	// Build the prompt: instruction + variable substitutions + event context
-	prompt := buildPrompt(sub.Instruction, bindings, ev)
+	// Build the prompt: instruction + variable substitutions + event
+	// context + current blackboard snapshot
+	prompt := buildPrompt(sub.Instruction, bindings, ev, a.Board)
 	fmt.Printf("     prompt bytes=%d\n", len(prompt))
 
 	// Call the reasoner
@@ -128,9 +129,15 @@ func (a *Agent) handleEvent(ctx context.Context, sub AgentSubscription, ev black
 }
 
 // buildPrompt constructs the prompt sent to the reasoner on each event.
-// It includes the agent's instruction with $var substitutions, plus
-// context about the triggering event and the current board state.
-func buildPrompt(instruction string, bindings matching.Bindings, ev blackboard.WriteEvent) string {
+// Includes the triggering event, the full current blackboard snapshot
+// (so the agent can decide whether its work is done), and instructions.
+//
+// Why the snapshot matters: in a pure event-driven model, the agent
+// only sees the triggering event and doesn't know what else has been
+// written. That means agents that should be idempotent ("write X once")
+// can't tell if X has already been written by a prior round. Giving
+// them the current board lets them check and make correct decisions.
+func buildPrompt(instruction string, bindings matching.Bindings, ev blackboard.WriteEvent, board *blackboard.Board) string {
 	// Substitute $var references in the instruction
 	substituted := instruction
 	for name, val := range bindings {
@@ -141,6 +148,7 @@ func buildPrompt(instruction string, bindings matching.Bindings, ev blackboard.W
 	var sb strings.Builder
 	sb.WriteString("## TASK\n")
 	sb.WriteString(substituted)
+
 	sb.WriteString("\n\n## TRIGGERING EVENT\n")
 	sb.WriteString(fmt.Sprintf("Key: %s\n", ev.Key))
 	sb.WriteString(fmt.Sprintf("Written by: %s (round %d)\n", ev.By, ev.Round))
@@ -149,10 +157,35 @@ func buildPrompt(instruction string, bindings matching.Bindings, ev blackboard.W
 		sb.WriteString(fmt.Sprintf("Previous value: %s\n", formatValue(ev.Previous)))
 	}
 
+	// Current board snapshot — so agents can reason about what's already
+	// been done. If "module_ready" is on the board, downstream agents
+	// know they should act. If their OWN output key is already there,
+	// they know to be silent.
+	sb.WriteString("\n## CURRENT BLACKBOARD STATE\n")
+	snap := board.Snapshot()
+	if len(snap) == 0 {
+		sb.WriteString("(board is empty)\n")
+	} else {
+		sb.WriteString("Keys currently on board:\n")
+		for _, e := range snap {
+			// Skip engine-internal keys — agents don't need to see ticks
+			if strings.HasPrefix(e.Key, "__") {
+				continue
+			}
+			// For brevity, show key + a short preview of value type
+			preview := formatValue(e.Value)
+			if len(preview) > 80 {
+				preview = preview[:77] + "..."
+			}
+			sb.WriteString(fmt.Sprintf("  - %s (by %s, round %d): %s\n",
+				e.Key, e.By, e.Round, preview))
+		}
+	}
+
 	sb.WriteString("\n## RESPONSE FORMAT\n")
 	sb.WriteString(`Respond with a JSON object of the form:
-  {"writes": [{"key": "...", "value": {...}}, ...]}
-If you have nothing to contribute, respond with:
+  {"writes": [{"key": "...", "value": "..."}, ...]}
+If you have nothing to contribute (e.g., the work you'd do is already done per the board state above), respond with:
   {"writes": []}
 Do not include any prose outside the JSON.`)
 
