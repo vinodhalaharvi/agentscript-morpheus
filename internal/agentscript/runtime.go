@@ -999,11 +999,20 @@ func (r *Runtime) executeCoordinate(ctx context.Context, name, body, input strin
 		return "", fmt.Errorf("coordinate %q parse error: %w", name, err)
 	}
 
-	// DIAG: what did we just parse?
-	fmt.Printf("   DIAG: parsed cfg — coord=%q conv=%q stability=%d max_rounds=%d agents=%d\n",
+	// DIAG: body inspection BEFORE parsing. Dumps the ENTIRE body the
+	// grammar handed us, so we can verify what reached parsing. If the
+	// context block is missing from here, the bug is upstream (grammar
+	// or preprocessor). If it's present but cfg.MaxRounds shows default,
+	// the bug is in ParseCoordinateBody.
+	fmt.Printf("\n   ====== DIAG: body reaching executeCoordinate ======\n")
+	fmt.Printf("   length=%d bytes\n", len(body))
+	fmt.Printf("   contains 'context (':    %v\n", strings.Contains(body, "context ("))
+	fmt.Printf("   contains 'max_rounds':   %v\n", strings.Contains(body, "max_rounds"))
+	fmt.Printf("   FULL BODY:\n")
+	fmt.Printf("-------8<-------\n%s\n------->8-------\n", body)
+	fmt.Printf("   parsed cfg — coord=%q conv=%q stability=%d max_rounds=%d agents=%d\n",
 		cfg.Coordination, cfg.Convergence, cfg.StabilityRounds, cfg.MaxRounds, len(cfg.Agents))
-	fmt.Printf("   DIAG: body length=%d bytes\n", len(body))
-	fmt.Printf("   DIAG: body first 300 bytes:\n%s\n", truncStr(body, 300))
+	fmt.Printf("   ====== END DIAG ======\n\n")
 
 	// Engine needs a Claude client — require CLAUDE_API_KEY for now
 	if r.claude == nil {

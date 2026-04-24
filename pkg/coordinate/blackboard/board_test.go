@@ -241,6 +241,53 @@ func TestNotifyTickVsWriteEquilibrium(t *testing.T) {
 	}
 }
 
+func TestIdempotentWritesDontBlockEquilibrium(t *testing.T) {
+	// A chatty agent that writes the same value every round should NOT
+	// block equilibrium. The state isn't changing, so the system IS at
+	// equilibrium even if the agent keeps re-asserting the same fact.
+	// Critical: agents with helpful-ack behavior (writing the same thing
+	// every tick) shouldn't prevent convergence.
+	b := NewBoard(LastWriteWins)
+
+	b.NextRound()
+	b.Write("greeting", "hello", "agent-a")
+
+	for i := 0; i < 3; i++ {
+		b.NextRound()
+		b.Write("greeting", "hello", "agent-a")
+	}
+
+	if b.WriteCount() != 4 {
+		t.Errorf("WriteCount: got %d, want 4", b.WriteCount())
+	}
+	if b.LastWriteRound() != 1 {
+		t.Errorf("LastWriteRound: got %d, want 1 (idempotent writes don't update)",
+			b.LastWriteRound())
+	}
+	if !b.NoWritesForRounds(3) {
+		t.Error("should be at 3-round equilibrium (idempotent writes don't count)")
+	}
+}
+
+func TestDifferentValueResetsEquilibrium(t *testing.T) {
+	b := NewBoard(LastWriteWins)
+
+	b.NextRound()
+	b.Write("k", "v1", "a")
+
+	b.NextRound()
+	b.NextRound()
+	if !b.NoWritesForRounds(2) {
+		t.Error("expected equilibrium after 2 quiet rounds")
+	}
+
+	b.NextRound()
+	b.Write("k", "v2", "a")
+	if b.NoWritesForRounds(2) {
+		t.Error("equilibrium should have reset after changing value")
+	}
+}
+
 func TestEquilibriumWithNoWrites(t *testing.T) {
 	b := NewBoard(LastWriteWins)
 	for i := 0; i < 5; i++ {

@@ -147,8 +147,19 @@ func (b *Board) Write(key string, value matching.Value, by string) (bool, error)
 		WrittenAt: time.Now(),
 		Round:     b.round,
 	}
+
+	// Idempotent-write handling for equilibrium: if this write produces
+	// the same value that's already there, still record it (caller asked
+	// us to) but DON'T reset lastWriteRound. An agent re-asserting the
+	// same fact isn't producing new activity — system state hasn't
+	// changed. Without this, a chatty agent re-writing identical content
+	// every tick would block convergence forever.
+	sameValue := exists && matching.ValuesEqual(prev.Value, value)
+
 	b.entries[key] = newEntry
-	b.lastWriteRound = b.round
+	if !sameValue {
+		b.lastWriteRound = b.round
+	}
 	b.writeCount.Add(1)
 
 	// Snapshot subscribers so we can notify without holding the lock

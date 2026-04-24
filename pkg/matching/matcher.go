@@ -188,6 +188,14 @@ func matchInto(p Pattern, v Value, b Bindings) bool {
 	return false
 }
 
+// ValuesEqual compares two Values structurally. Exported wrapper around
+// the internal valuesEqual. Used by pkg/coordinate/blackboard for
+// idempotent-write detection (writes with an unchanged value shouldn't
+// reset the equilibrium clock).
+func ValuesEqual(a, b Value) bool {
+	return valuesEqual(a, b)
+}
+
 // valuesEqual compares two values structurally. Handles the types we
 // expect from JSON-decoded data: bool, string, float64, nil, []Value,
 // map[string]Value. Falls back to fmt.Sprintf comparison for exotic
