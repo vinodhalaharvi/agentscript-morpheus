@@ -999,6 +999,12 @@ func (r *Runtime) executeCoordinate(ctx context.Context, name, body, input strin
 		return "", fmt.Errorf("coordinate %q parse error: %w", name, err)
 	}
 
+	// DIAG: what did we just parse?
+	fmt.Printf("   DIAG: parsed cfg — coord=%q conv=%q stability=%d max_rounds=%d agents=%d\n",
+		cfg.Coordination, cfg.Convergence, cfg.StabilityRounds, cfg.MaxRounds, len(cfg.Agents))
+	fmt.Printf("   DIAG: body length=%d bytes\n", len(body))
+	fmt.Printf("   DIAG: body first 300 bytes:\n%s\n", truncStr(body, 300))
+
 	// Engine needs a Claude client — require CLAUDE_API_KEY for now
 	if r.claude == nil {
 		return "", fmt.Errorf("coordinate %q: Claude client not initialized; set CLAUDE_API_KEY", name)
@@ -3422,4 +3428,13 @@ func (r *Runtime) log(format string, args ...any) {
 	if r.verbose {
 		fmt.Printf("[agentscript] "+format+"\n", args...)
 	}
+}
+
+// truncStr returns the first n bytes of s, appending "..." if truncated.
+// Diagnostic helper.
+func truncStr(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }

@@ -72,18 +72,31 @@ func (a *Agent) Subscribe(ctx context.Context, sub AgentSubscription) uint64 {
 // handleEvent is the per-event reaction logic. Keeps the subscribe
 // method clean and testable.
 func (a *Agent) handleEvent(ctx context.Context, sub AgentSubscription, ev blackboard.WriteEvent, bindings matching.Bindings) error {
+	fmt.Printf("  🔔 agent=%s triggered by key=%s by=%s\n", a.ID, ev.Key, ev.By)
+
 	// Don't react to own writes (avoid infinite loops)
 	if ev.By == a.ID {
+		fmt.Printf("     skip: own write\n")
 		return nil
 	}
 
 	// Build the prompt: instruction + variable substitutions + event context
 	prompt := buildPrompt(sub.Instruction, bindings, ev)
+	fmt.Printf("     prompt bytes=%d\n", len(prompt))
 
 	// Call the reasoner
 	resp, err := a.Session.Chat(ctx, prompt)
 	if err != nil {
+		fmt.Printf("     ❌ chat error: %v\n", err)
 		return fmt.Errorf("agent %s chat: %w", a.ID, err)
+	}
+	fmt.Printf("     response bytes=%d\n", len(resp))
+	if len(resp) > 0 {
+		preview := resp
+		if len(preview) > 300 {
+			preview = preview[:300] + "..."
+		}
+		fmt.Printf("     response preview: %s\n", preview)
 	}
 
 	// Parse JSON from response — reasoner is expected to return either
@@ -93,19 +106,22 @@ func (a *Agent) handleEvent(ctx context.Context, sub AgentSubscription, ev black
 	if err != nil {
 		// Non-fatal — the agent produced unstructured output. Log and
 		// continue; this is a model-quality issue not a coordination bug.
-		fmt.Printf("  ⚠️  agent %s: unparseable response (%v)\n", a.ID, err)
+		fmt.Printf("     ⚠️  unparseable response: %v\n", err)
 		return nil
 	}
+	fmt.Printf("     parsed %d writes\n", len(writes))
 
 	// Apply writes
 	for _, w := range writes {
 		wrote, err := a.Board.Write(w.Key, w.Value, a.ID)
 		if err != nil {
-			fmt.Printf("  ⚠️  agent %s write %s: %v\n", a.ID, w.Key, err)
+			fmt.Printf("     ⚠️  write %s: %v\n", w.Key, err)
 			continue
 		}
 		if wrote {
-			fmt.Printf("  📝 %s wrote %s\n", a.ID, w.Key)
+			fmt.Printf("     📝 wrote %s\n", w.Key)
+		} else {
+			fmt.Printf("     ⊘ write to %s REJECTED by policy\n", w.Key)
 		}
 	}
 	return nil
