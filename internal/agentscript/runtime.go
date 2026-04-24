@@ -17,6 +17,7 @@ import (
 
 	"github.com/vinodhalaharvi/agentscript/pkg/cache"
 	"github.com/vinodhalaharvi/agentscript/pkg/claude"
+	"github.com/vinodhalaharvi/agentscript/pkg/coordinate"
 	agcrypto "github.com/vinodhalaharvi/agentscript/pkg/crypto"
 	"github.com/vinodhalaharvi/agentscript/pkg/gemini"
 	aggithub "github.com/vinodhalaharvi/agentscript/pkg/github"
@@ -235,16 +236,20 @@ func preprocessConverge(dsl string) string {
 
 		// Look for: converge "name" (
 		// or:       >=> converge "name" (
+		//
+		// Must be followed by whitespace or quote — NOT a letter —
+		// otherwise `convergence` (used as a directive in coordinate
+		// blocks) would match and corrupt the output.
 		isConverge := false
 		prefix := ""
-		if strings.Contains(trimmed, "converge") {
-			// Extract everything before "converge" as a prefix (e.g., ">=> ")
-			idx := strings.Index(trimmed, "converge")
-			prefix = trimmed[:idx]
-			rest := trimmed[idx:]
-			if strings.HasPrefix(rest, "converge") {
-				isConverge = true
-				_ = rest
+		if idx := strings.Index(trimmed, "converge"); idx >= 0 {
+			after := idx + len("converge")
+			if after < len(trimmed) {
+				c := trimmed[after]
+				if c == ' ' || c == '\t' || c == '"' || c == '(' {
+					prefix = trimmed[:idx]
+					isConverge = true
+				}
 			}
 		}
 
@@ -321,11 +326,11 @@ func preprocessConverge(dsl string) string {
 					} else if c == ')' && started {
 						depth--
 						if depth == 0 {
-							// Encode the body: escape quotes, join with |||
-							body := strings.Join(bodyLines, "|||")
-							// Also capture remainder of this line before )
-							body = strings.ReplaceAll(body, `"`, `\"`)
-							rewritten := prefix + `converge "` + name + `" "` + body + `"`
+							// Wrap body in triple-quoted string — no escape
+							// games. Everything inside survives literally:
+							// newlines, quotes, backticks.
+							body := strings.Join(bodyLines, "\n")
+							rewritten := prefix + `converge "` + name + `" """` + body + `"""`
 							out = append(out, rewritten)
 							j++
 							goto nextLine
@@ -395,13 +400,16 @@ func preprocessBlockCommand(dsl string, keyword string) string {
 
 		isBlock := false
 		prefix := ""
-		if strings.Contains(trimmed, keyword) {
-			idx := strings.Index(trimmed, keyword)
-			prefix = trimmed[:idx]
-			rest := trimmed[idx:]
-			if strings.HasPrefix(rest, keyword) {
-				isBlock = true
-				_ = rest
+		// Keyword must be followed by whitespace or a quote — NOT a letter.
+		// Otherwise `coordinate` would match `coordination`, etc.
+		if idx := strings.Index(trimmed, keyword); idx >= 0 {
+			after := idx + len(keyword)
+			if after < len(trimmed) {
+				c := trimmed[after]
+				if c == ' ' || c == '\t' || c == '"' || c == '(' {
+					prefix = trimmed[:idx]
+					isBlock = true
+				}
 			}
 		}
 
@@ -477,9 +485,11 @@ func preprocessBlockCommand(dsl string, keyword string) string {
 					} else if c == ')' && started {
 						depth--
 						if depth == 0 {
-							body := strings.Join(bodyLines, "|||")
-							body = strings.ReplaceAll(body, `"`, `\"`)
-							rewritten := prefix + keyword + ` "` + name + `" "` + body + `"`
+							// Wrap body in triple-quoted raw string. Nested
+							// quotes, backticks, and newlines survive
+							// literally. No double-escape bugs possible.
+							body := strings.Join(bodyLines, "\n")
+							rewritten := prefix + keyword + ` "` + name + `" """` + body + `"""`
 							out = append(out, rewritten)
 							j++
 							goto nextBlockLine
@@ -852,12 +862,10 @@ func (r *Runtime) executeCommand(ctx context.Context, cmd *Command, input string
 }
 
 // executeConverge runs an intent-driven reconciliation loop.
-// name is the converge block name, body is the encoded body (||| separated lines).
-func (r *Runtime) executeConverge(ctx context.Context, name, encodedBody, input string) (string, error) {
-	// Decode the body: ||| back to newlines, unescape quotes
-	body := strings.ReplaceAll(encodedBody, "|||", "\n")
-	body = strings.ReplaceAll(body, `\"`, `"`)
-
+// name is the converge block name, body is the raw body text from between
+// the outermost ( ) of the converge block — delivered via triple-quoted
+// string in the rewritten form, so no decoding is needed.
+func (r *Runtime) executeConverge(ctx context.Context, name, body, input string) (string, error) {
 	// If there was piped input, make it available as a file the context can read
 	if input != "" {
 		os.WriteFile(".converge-input.txt", []byte(input), 0644)
@@ -985,11 +993,7 @@ func (r *Runtime) executeConverge(ctx context.Context, name, encodedBody, input 
 //
 // Input is optional piped text from >=>. If present, we treat it as
 // seed content for the board under the key "__input__".
-func (r *Runtime) executeCoordinate(ctx context.Context, name, encodedBody, input string) (string, error) {
-	// Decode the body — same format as converge
-	body := strings.ReplaceAll(encodedBody, "|||", "\n")
-	body = strings.ReplaceAll(body, `\"`, `"`)
-
+func (r *Runtime) executeCoordinate(ctx context.Context, name, body, input string) (string, error) {
 	cfg, err := coordinate.ParseCoordinateBody(name, body)
 	if err != nil {
 		return "", fmt.Errorf("coordinate %q parse error: %w", name, err)

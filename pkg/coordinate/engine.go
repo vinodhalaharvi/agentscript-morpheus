@@ -111,31 +111,30 @@ func (e *Engine) Run(ctx context.Context) (string, error) {
 		currentRound := board.NextRound()
 
 		// Tick the agents — force each agent to consider the current state.
-		// In a pure event-driven model, agents only react to writes. But
-		// initial seeding might not fire the patterns all agents care about
-		// (e.g., new agents joining, agents reacting to "nothing changed
-		// but I now have a thought"). For v1, on each round we synthesize
-		// a "tick" event per agent so they can volunteer contributions.
+		// In pure event-driven mode, agents only react to writes. But the
+		// FIRST round of a coordination run has nothing on the board, so
+		// no subscriptions would ever fire. We synthesize a tick event per
+		// round so agents can volunteer contributions.
 		//
-		// Implementation: write a tick entry to the board; any agent
-		// subscribing to it reacts. Agents that don't subscribe to ticks
-		// are purely event-driven (fine).
+		// CRITICAL: NotifyTick dispatches WITHOUT counting as a write.
+		// If we used board.Write here, the engine itself would always be
+		// writing every round, making equilibrium impossible to reach.
+		// Equilibrium must measure real agent activity — the engine's
+		// internal plumbing must not count.
 		tickKey := fmt.Sprintf("__tick__/%d", currentRound)
-		board.Write(tickKey, map[string]interface{}{
+		board.NotifyTick(tickKey, map[string]interface{}{
 			"round": float64(currentRound),
-		}, "__engine__")
+		})
 
-		// Allow subscriptions to process. In the current synchronous
-		// dispatch model, this is a pause to let any async agent calls
-		// settle. Since agent handlers call Claude synchronously, this
-		// pause is mostly cosmetic but prevents a tight spin loop in
-		// the degenerate case of no agents reacting.
+		// Allow subscriptions to process. Synchronous handler model:
+		// when an agent's subscription fires, it calls Claude, parses
+		// the response, and calls board.Write() — all within the
+		// dispatch call chain. By the time NotifyTick returns, the
+		// handlers for this round have already run.
 		time.Sleep(e.RoundDelay)
 
-		writesThisRound := board.WriteCount()
-		_ = writesThisRound // diagnostic hook
-
-		// Check convergence
+		// Check convergence BEFORE printing the round summary, so the
+		// summary doesn't suggest we'll keep going when we're done.
 		if pred.Satisfied() {
 			fmt.Println()
 			fmt.Printf("✨ Convergence reached at round %d\n", round)
@@ -144,7 +143,12 @@ func (e *Engine) Run(ctx context.Context) (string, error) {
 			return string(witnessJSON), nil
 		}
 
-		fmt.Printf("   %d total writes on board\n", board.WriteCount())
+		// Round summary. "Total writes" here means REAL agent writes
+		// (ticks excluded). If this number isn't growing, agents are
+		// quiet and convergence should fire soon.
+		lastWriteRound := board.LastWriteRound()
+		fmt.Printf("   %d agent writes total; last write was round %d\n",
+			board.WriteCount(), lastWriteRound)
 	}
 
 	// Max rounds exhausted

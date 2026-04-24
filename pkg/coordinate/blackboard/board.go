@@ -168,6 +168,35 @@ func (b *Board) Write(key string, value matching.Value, by string) (bool, error)
 	return true, nil
 }
 
+// NotifyTick dispatches an event to all subscribers WITHOUT counting as
+// a board write. The coordination engine uses this to wake agents each
+// round so they can volunteer contributions. Because this doesn't touch
+// writeCount or lastWriteRound, the equilibrium predicate continues to
+// measure real agent activity rather than engine plumbing.
+//
+// The tick key and value are still visible to subscribers as a normal
+// WriteEvent — agents subscribing to "__tick__/*" will receive these.
+func (b *Board) NotifyTick(key string, value matching.Value) {
+	b.mu.RLock()
+	subs := make([]*Subscription, 0, len(b.subs))
+	for _, s := range b.subs {
+		subs = append(subs, s)
+	}
+	round := b.round
+	b.mu.RUnlock()
+
+	event := WriteEvent{
+		Entry: Entry{
+			Key:       key,
+			Value:     value,
+			By:        "__engine__",
+			WrittenAt: time.Now(),
+			Round:     round,
+		},
+	}
+	b.dispatch(subs, event)
+}
+
 func (b *Board) dispatch(subs []*Subscription, event WriteEvent) {
 	for _, s := range subs {
 		if s.keyFilter != nil && !s.keyFilter(event.Key) {

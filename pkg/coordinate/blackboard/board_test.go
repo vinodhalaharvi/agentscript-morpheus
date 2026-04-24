@@ -185,6 +185,62 @@ func TestRoundAdvancementAndEquilibrium(t *testing.T) {
 	}
 }
 
+func TestNotifyTickDispatchesButDoesNotCount(t *testing.T) {
+	// NotifyTick should wake subscribers without counting as a write.
+	// This is critical for equilibrium detection: if engine ticks counted
+	// as writes, the board would always appear active and equilibrium
+	// would never fire.
+	b := NewBoard(LastWriteWins)
+	pat, _ := matching.Parse("_")
+
+	var fired int
+	b.Subscribe("watcher", pat, nil, func(ev WriteEvent, _ matching.Bindings) error {
+		fired++
+		return nil
+	})
+
+	// Advance some rounds and send ticks
+	for i := 0; i < 5; i++ {
+		b.NextRound()
+		b.NotifyTick("__tick__", map[string]interface{}{"round": float64(i)})
+	}
+
+	// Subscriber should have fired 5 times (once per tick)
+	if fired != 5 {
+		t.Errorf("subscriber fired %d times, want 5", fired)
+	}
+
+	// But board should report zero writes
+	if b.WriteCount() != 0 {
+		t.Errorf("WriteCount: got %d, want 0 (ticks should not count)", b.WriteCount())
+	}
+
+	// Equilibrium should fire — no writes for 3 rounds means stable
+	if !b.NoWritesForRounds(3) {
+		t.Error("equilibrium should be satisfied — ticks alone should not block it")
+	}
+}
+
+func TestNotifyTickVsWriteEquilibrium(t *testing.T) {
+	// Real agent write resets the equilibrium clock; tick does not.
+	b := NewBoard(LastWriteWins)
+
+	// Round 1: real write
+	b.NextRound()
+	b.Write("agent-result", "hello", "agent-a")
+
+	// Rounds 2-4: just ticks
+	for i := 0; i < 3; i++ {
+		b.NextRound()
+		b.NotifyTick("__tick__", nil)
+	}
+
+	// Board should report 3 rounds since last REAL write
+	if !b.NoWritesForRounds(3) {
+		t.Error("should be at 3-round equilibrium (ticks don't reset clock)")
+	}
+}
+
 func TestEquilibriumWithNoWrites(t *testing.T) {
 	b := NewBoard(LastWriteWins)
 	for i := 0; i < 5; i++ {
