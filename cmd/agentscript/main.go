@@ -289,14 +289,45 @@ func coalesce(vals ...string) string {
 }
 
 // hasIntentBlocks checks if a .as file contains context/intent/validate blocks
+// hasIntentBlocks checks if a .as file is an intent-style file (has
+// top-level context/intent/validate blocks that drive the intent engine),
+// NOT a pipeline file that happens to contain a coordinate or converge
+// block with nested `context (...)` inside.
+//
+// Depth-aware: tracks ( ) nesting so we only look for these keywords at
+// top-level (depth 0). A coordinate block containing `context (...)` as
+// a nested config block does NOT make the enclosing file intent-style.
+//
+// Without this check, intent.ParseFile would greedily consume nested
+// context blocks out of coordinate/converge bodies, leaving the
+// downstream parser with a mangled body missing stability_rounds and
+// max_rounds — silent default fallback, hard-to-diagnose bug.
 func hasIntentBlocks(content string) bool {
 	lines := strings.Split(content, "\n")
+	depth := 0
 	for _, line := range lines {
 		t := strings.TrimSpace(line)
-		if strings.HasPrefix(t, "intent ") || strings.HasPrefix(t, "intent(") ||
-			strings.HasPrefix(t, "context ") || strings.HasPrefix(t, "context(") ||
-			strings.HasPrefix(t, "validate ") || strings.HasPrefix(t, "validate(") {
-			return true
+		if t == "" || strings.HasPrefix(t, "//") {
+			continue
+		}
+		if depth == 0 {
+			if strings.HasPrefix(t, "intent ") || strings.HasPrefix(t, "intent(") ||
+				strings.HasPrefix(t, "validate ") || strings.HasPrefix(t, "validate(") ||
+				strings.HasPrefix(t, "context ") || strings.HasPrefix(t, "context(") {
+				return true
+			}
+		}
+		// Update paren depth from this line's contents.
+		for i := 0; i < len(t); i++ {
+			c := t[i]
+			if c == '(' {
+				depth++
+			} else if c == ')' {
+				depth--
+				if depth < 0 {
+					depth = 0
+				}
+			}
 		}
 	}
 	return false
