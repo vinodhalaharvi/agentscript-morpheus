@@ -173,7 +173,13 @@ func preprocessDSL(dsl string) string {
 	// First pass: extract converge blocks
 	dsl = preprocessConverge(dsl)
 
-	// Second pass: handle match blocks
+	// Same preprocessor, different keyword — coordinate blocks also need
+	// to be rewritten to `coordinate "name" "encoded-body"` so they
+	// survive the Participle grammar (which expects a Command with
+	// string args, not a multi-line block).
+	dsl = preprocessBlockCommand(dsl, "coordinate")
+
+	// Next pass: handle match blocks
 	lines := strings.Split(dsl, "\n")
 	var out []string
 	i := 0
@@ -354,6 +360,154 @@ func preprocessConverge(dsl string) string {
 		continue
 
 	nextLine:
+		i = j
+	}
+
+	return strings.Join(out, "\n")
+}
+
+// preprocessBlockCommand is a generalization of preprocessConverge. It
+// transforms any block command of the form:
+//
+//	keyword "name" (
+//	  ...body...
+//	)
+//
+// into:
+//
+//	keyword "name" "encoded-body"
+//
+// where the body has newlines replaced by ||| and quotes escaped. This
+// is what lets block-style DSL commands (converge, coordinate, and
+// future ones) survive the single-line Participle grammar.
+//
+// The structure mirrors preprocessConverge exactly because the problem
+// is the same — only the keyword differs. Rather than copy-paste the
+// 150 lines of paren-balancing logic for each new block command, this
+// function takes the keyword as a parameter.
+func preprocessBlockCommand(dsl string, keyword string) string {
+	lines := strings.Split(dsl, "\n")
+	var out []string
+	i := 0
+
+	for i < len(lines) {
+		trimmed := strings.TrimSpace(lines[i])
+
+		isBlock := false
+		prefix := ""
+		if strings.Contains(trimmed, keyword) {
+			idx := strings.Index(trimmed, keyword)
+			prefix = trimmed[:idx]
+			rest := trimmed[idx:]
+			if strings.HasPrefix(rest, keyword) {
+				isBlock = true
+				_ = rest
+			}
+		}
+
+		if !isBlock {
+			out = append(out, lines[i])
+			i++
+			continue
+		}
+
+		// Find the name (first quoted string after keyword)
+		line := trimmed
+		name := ""
+		nameStart := strings.Index(line, `"`)
+		if nameStart >= 0 {
+			nameEnd := strings.Index(line[nameStart+1:], `"`)
+			if nameEnd >= 0 {
+				name = line[nameStart+1 : nameStart+1+nameEnd]
+			}
+		}
+		if name == "" {
+			nameStart = strings.Index(line, `'`)
+			if nameStart >= 0 {
+				nameEnd := strings.Index(line[nameStart+1:], `'`)
+				if nameEnd >= 0 {
+					name = line[nameStart+1 : nameStart+1+nameEnd]
+				}
+			}
+		}
+
+		// Find the opening ( and balanced )
+		depth := 0
+		started := false
+		var bodyLines []string
+		j := i
+
+		for j < len(lines) {
+			line := lines[j]
+			inDouble := false
+			inSingle := false
+			inBacktick := false
+			prev := byte(0)
+
+			for k := 0; k < len(line); k++ {
+				c := line[k]
+				inQ := inDouble || inSingle || inBacktick
+
+				if !inQ {
+					if c == '"' {
+						inDouble = true
+					} else if c == '\'' {
+						inSingle = true
+					} else if c == '`' {
+						inBacktick = true
+					}
+				} else {
+					if c == '"' && inDouble && prev != '\\' {
+						inDouble = false
+					} else if c == '\'' && inSingle && prev != '\\' {
+						inSingle = false
+					} else if c == '`' && inBacktick {
+						inBacktick = false
+					}
+				}
+
+				if !inDouble && !inSingle && !inBacktick {
+					if c == '(' {
+						depth++
+						if !started {
+							started = true
+							prev = c
+							continue
+						}
+					} else if c == ')' && started {
+						depth--
+						if depth == 0 {
+							body := strings.Join(bodyLines, "|||")
+							body = strings.ReplaceAll(body, `"`, `\"`)
+							rewritten := prefix + keyword + ` "` + name + `" "` + body + `"`
+							out = append(out, rewritten)
+							j++
+							goto nextBlockLine
+						}
+					}
+				}
+				prev = c
+			}
+
+			if started && depth > 0 {
+				if j == i {
+					openIdx := strings.Index(line, "(")
+					if openIdx >= 0 && openIdx+1 < len(line) {
+						bodyLines = append(bodyLines, strings.TrimSpace(line[openIdx+1:]))
+					}
+				} else {
+					bodyLines = append(bodyLines, line)
+				}
+			}
+			j++
+		}
+
+		// Unclosed block — pass through
+		out = append(out, lines[i])
+		i++
+		continue
+
+	nextBlockLine:
 		i = j
 	}
 
@@ -681,6 +835,10 @@ func (r *Runtime) executeCommand(ctx context.Context, cmd *Command, input string
 	case "converge":
 		result, err = r.executeConverge(ctx, cmd.Arg, cmd.Arg2, input)
 
+	// ==================== Coordinate (multi-agent coordination) ====================
+	case "coordinate":
+		result, err = r.executeCoordinate(ctx, cmd.Arg, cmd.Arg2, input)
+
 	default:
 		err = fmt.Errorf("unknown action: %s", cmd.Action)
 	}
@@ -814,6 +972,48 @@ func (r *Runtime) executeConverge(ctx context.Context, name, encodedBody, input 
 	}
 
 	return fmt.Sprintf("converge %q: all intents satisfied", name), nil
+}
+
+// executeCoordinate runs a multi-agent coordinate block.
+// The body is encoded the same way as converge (||| separated lines with
+// escaped quotes), produced by preprocessBlockCommand.
+//
+// Unlike converge (which iterates against a validation set), coordinate
+// spins up multiple agents that subscribe to a shared blackboard. The
+// engine advances rounds, dispatches events, and terminates when the
+// configured convergence predicate is satisfied.
+//
+// Input is optional piped text from >=>. If present, we treat it as
+// seed content for the board under the key "__input__".
+func (r *Runtime) executeCoordinate(ctx context.Context, name, encodedBody, input string) (string, error) {
+	// Decode the body — same format as converge
+	body := strings.ReplaceAll(encodedBody, "|||", "\n")
+	body = strings.ReplaceAll(body, `\"`, `"`)
+
+	cfg, err := coordinate.ParseCoordinateBody(name, body)
+	if err != nil {
+		return "", fmt.Errorf("coordinate %q parse error: %w", name, err)
+	}
+
+	// Engine needs a Claude client — require CLAUDE_API_KEY for now
+	if r.claude == nil {
+		return "", fmt.Errorf("coordinate %q: Claude client not initialized; set CLAUDE_API_KEY", name)
+	}
+
+	engine := coordinate.NewEngine(cfg, r.claude)
+
+	// If we got piped input, seed it onto the board under a conventional key
+	if input != "" {
+		engine.SeedEntries = []coordinate.SeedEntry{
+			{Key: "__input__", Value: input},
+		}
+	}
+
+	witness, err := engine.Run(ctx)
+	if err != nil {
+		return "", err
+	}
+	return witness, nil
 }
 
 // geminiCall makes a call to the Gemini API

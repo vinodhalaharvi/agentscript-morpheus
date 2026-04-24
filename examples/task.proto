@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package service.v1;
+
+option go_package = "github.com/vinodhalaharvi/project-layout/gen/service/v1;servicev1";
+
+service TaskService {
+  rpc GetTask(GetTaskRequest) returns (Task);
+  rpc ListTasks(ListTasksRequest) returns (ListTasksResponse);
+  rpc CreateTask(CreateTaskRequest) returns (Task);
+}
+
+message Task {
+  string id = 1;
+  string title = 2;
+  string description = 3;
+  bool done = 4;
+  int64 created_at = 5;
+}
+
+message GetTaskRequest {
+  string id = 1;
+}
+
+message ListTasksRequest {
+  int32 page_size = 1;
+  string page_token = 2;
+}
+
+message ListTasksResponse {
+  repeated Task tasks = 1;
+  string next_page_token = 2;
+}
+
+message CreateTaskRequest {
+  string title = 1;
+  string description = 2;
+}
